@@ -1,0 +1,27 @@
+{
+  "name": "cc-anchor",
+  "displayName": "cc-anchor",
+  "version": "0.1.0",
+  "description": "An anchor card that survives context compaction: goal, invariants, recent tool-call breadcrumbs and your kronicle-lite cursor, written to disk before every compaction and re-injected verbatim after it. Ships a drift statusline.",
+  "author": {
+    "name": "Joshua Bryan",
+    "url": "https://isokron.ai"
+  },
+  "homepage": "https://isokron.ai",
+  "repository": "https://github.com/rafe-walker/cc-anchor",
+  "license": "Apache-2.0",
+  "keywords": [
+    "compaction",
+    "context",
+    "hooks",
+    "statusline",
+    "session-state",
+    "anchor",
+    "kronicle-lite",
+    "drift"
+  ],
+  "icon": "./assets/icon.png",
+  "documentationUrl": "https://github.com/rafe-walker/cc-anchor#readme",
+  "supportUrl": "https://github.com/rafe-walker/cc-anchor/issues",
+  "privacyPolicyUrl": "https://isokron.ai/privacy"
+}

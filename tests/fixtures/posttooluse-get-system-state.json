@@ -1,0 +1,16 @@
+{
+  "session_id": "abc123",
+  "cwd": "/Users/...",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__kronicle-lite__get_system_state",
+  "tool_input": { "focus": "pulse", "budget_tokens": 400 },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "# kronicle-lite orient — head seq 42 (deadbeefcafe…)\n\n> no drift\n\n**cursor_compact:** `sxt1c.42.Ab12Cd34`  \n**recovery:** presented — cursor accepted\n\n<details><summary>full cursor</summary>\n\n`sxt1.eyJhY3RvciI6ImNsYXVkZSJ9.c2lnbmF0dXJl`\n\n</details>"
+      }
+    ]
+  },
+  "tool_use_id": "toolu_01XYZ"
+}

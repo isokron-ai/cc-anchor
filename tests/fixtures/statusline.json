@@ -1,0 +1,19 @@
+{
+  "cwd": "/current/working/directory",
+  "session_id": "abc123...",
+  "transcript_path": "/path/to/transcript.jsonl",
+  "model": { "id": "claude-opus-5-5", "display_name": "Opus" },
+  "workspace": {
+    "current_dir": "/current/working/directory",
+    "project_dir": "/original/project/directory",
+    "added_dirs": []
+  },
+  "version": "2.1.90",
+  "context_window": {
+    "total_input_tokens": 15500,
+    "total_output_tokens": 1200,
+    "context_window_size": 200000,
+    "used_percentage": 8,
+    "remaining_percentage": 92
+  }
+}

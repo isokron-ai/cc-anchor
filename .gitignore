@@ -1,0 +1,5 @@
+node_modules/
+.claude/cc-anchor/
+.claude/anchor.md
+*.tmp.*
+.DS_Store

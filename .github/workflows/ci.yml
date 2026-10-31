@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install jq and shellcheck
+        run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Hook hot-path timing
+        run: |
+          mkdir -p /tmp/proj/.git
+          payload='{"session_id":"ci","cwd":"/tmp/proj","hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"/tmp/proj/README.md"},"tool_response":{}}'
+          export CLAUDE_PROJECT_DIR=/tmp/proj
+          for i in 1 2 3; do echo "$payload" | bash scripts/post-tool-use.sh; done
+          start=$(date +%s%N); for i in $(seq 10); do echo "$payload" | bash scripts/post-tool-use.sh; done; end=$(date +%s%N)
+          echo "PostToolUse mean: $(( (end - start) / 10000000 )) ms"
+          cat /tmp/proj/.claude/anchor.md
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate plugin + marketplace (strict, directory profile)
+        run: claude plugin validate --strict --profile directory .
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install jq
+        run: brew install jq
+      - name: Test on macOS (BSD date, Homebrew bash)
+        run: npm test
