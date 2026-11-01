@@ -22,6 +22,16 @@ SemVer.
   has left the stamp's second. Reproduced on Linux with a forced 1-second
   view (`CC_ANCHOR_TEST_MTIME_SECONDS=1`, test-only); the hot-path test now
   runs in both views, plus an exact-tie test.
+- **Pulse matcher (stress F05: 6/74 still missed on 0.4.0).** Backslash-
+  newline continuations between tool and verb (`terraform -chdir=infra \⏎
+  apply`, `kubectl -n prod \⏎ apply`, `git \⏎ push`) are joined; the verb
+  counts even when quoted (`"git" "push"`; later quoted arguments still
+  never match); `git subtree push` / `git lfs push` read as `git push`;
+  here-documents are cut out before lexing and, when an interpreter reads
+  them (`python3 - <<'PY'`, `cat <<EOF | bash`), scanned as code with
+  `subprocess.run(['git','push'])`-style lists flattened (same deny-once as
+  one-liners). A here-doc written to a file is not run and stays quiet.
+  Corpus: 74/74 detected, 0/11 false alarms (in-repo copy, 85 cases).
 
 ## [0.4.0] — 2026-11-01
 
