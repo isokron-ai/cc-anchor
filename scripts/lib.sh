@@ -538,3 +538,213 @@ cc_emit_deny() { jq -nc --arg r "$1" '{hookSpecificOutput:{hookEventName:"PreToo
 
 # Short, slug-safe session id fragment.
 cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s' "${s:0:8}" | tr '[:upper:]' '[:lower:]'; }
+
+# ═══════════════════ 0.4.0: kronicle-lite retraction push + pulse ═══════════════════
+#
+# Track B (agent-memory-bench, T1): agents that orient at session start never
+# re-orient before a deploy (0/36 pull runs); pushing new retractions into the
+# context after each tool call fixed it (10/10). Two hooks share this code:
+#
+#   PostToolUse (push)   after every tool call, fetch the retractions that
+#                        landed since this session's cursor and inject them
+#                        as additionalContext; advance + persist the cursor.
+#   PreToolUse (pulse)   before a world-changing Bash command (config
+#                        `pulse_match`), same fetch; an unreconciled semantic
+#                        safety/behavioral retraction denies the command
+#                        (config `pulse_mode`: deny | warn).
+#
+# Per-session runtime files under $CC_RUN/push/<sid8>.*:
+#   cfg      "<data dir>\n<cli path>" — resolved once per session
+#   off      kronicle-lite not configured / no CLI: the hooks are inert
+#   cursor   full kronicle-lite cursor (actor cc-anchor-<sid8>)
+#   seq      chain head seq the cursor was issued at
+#   stamp    mtime gate: touched just BEFORE each read of the chain. While
+#            kronicle-lite.db and its -wal are older than the stamp nothing
+#            can have changed, so the hot path costs two builtin `-ot` tests
+#            and no process. A change makes the next call run a read-only
+#            `orient --focus pulse` (head seq) and, only if the head moved,
+#            `orient --cursor C --focus retractions`.
+#   pending  blocking retractions the push delivered on the LAST tool result.
+#            Any later tool call clears it (the agent had a turn to act on
+#            it); a world-changing command issued straight after the push is
+#            denied first.
+#   fail     epoch of the last CLI failure (back-off: retry after 60 s)
+#
+# Fail-open everywhere: a missing CLI, a slow or broken store, a timeout
+# (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
+# and never prints anything but valid hook JSON; one log line says why.
+
+CC_KL_B=""; CC_KL_SID=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
+KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
+
+cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
+  local __t
+  printf -v __t '%(%s)T' -1 2>/dev/null || __t=""
+  [[ "$__t" =~ ^[0-9]+$ ]] || __t="$(date +%s)"
+  printf -v "$1" '%s' "$__t"
+}
+
+# cc_kl_session <session_id> — per-session file prefix (builtins only).
+cc_kl_session() {
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  CC_KL_SID="${s:-nosession}"
+  CC_KL_B="$CC_RUN/push/$CC_KL_SID"
+}
+
+# Data dir of the kronicle-lite store the agent's MCP server uses.
+# CC_ANCHOR_KRONICLE_DATA_DIR > config kronicle_data_dir > the kronicle MCP
+# server's --data-dir / KRONICLE_LITE_DATA_DIR in .mcp.json or ~/.claude.json
+# > $KRONICLE_LITE_DATA_DIR > "" (the CLI's own default, ~/.kronicle-lite).
+cc_kl_data_dir() {
+  local v f
+  v="${CC_ANCHOR_KRONICLE_DATA_DIR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  v="$(cc_cfg_raw kronicle_data_dir)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+    [[ -s "$f" ]] || continue
+    v="$(jq -r --arg root "$CC_ROOT" '
+        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
+        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
+        | map(((.args // []) | index("--data-dir") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_DATA_DIR // empty)
+        | first // empty' "$f" 2>/dev/null)"
+    [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  done
+  printf '%s' "${KRONICLE_LITE_DATA_DIR:-}"
+}
+
+# cc_kl_enabled — 0 when the push/pulse should run for this session (and
+# CC_KL_DD / CC_KL_BIN are set). Switch `push`: on | off | auto (default:
+# on when kronicle-lite is configured for the project). Resolved once per
+# session into <sid8>.cfg / <sid8>.off; env CC_ANCHOR_PUSH=0 always wins.
+cc_kl_enabled() {
+  [[ "${CC_ANCHOR_KRONICLE:-}" == 0 ]] && return 1
+  local sw; sw="$(cc_cfg_raw push)"
+  case "$sw" in 0|false|no|off) return 1;; esac
+  if [[ -s "$CC_KL_B.cfg" ]]; then
+    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; } < "$CC_KL_B.cfg"
+    [[ -n "$CC_KL_BIN" ]] && return 0
+  fi
+  [[ -e "$CC_KL_B.off" ]] && return 1
+  mkdir -p "$CC_RUN/push" 2>/dev/null || return 1
+  case "$sw" in
+    1|true|yes|on) ;;
+    *) cc_kronicle_configured || { : > "$CC_KL_B.off"; return 1; };;
+  esac
+  CC_KL_BIN="$(cc_find_cli kronicle-lite)" || {
+    : > "$CC_KL_B.off"
+    cc_log_once kl_nobin "push: kronicle-lite is configured but its CLI was not found (PATH, plugin cache, CC_ANCHOR_KRONICLE_LITE_BIN); retraction push/pulse off"
+    return 1; }
+  CC_KL_DD="$(cc_kl_data_dir)"
+  printf '%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" > "$CC_KL_B.cfg" 2>/dev/null || return 1
+  return 0
+}
+
+# cc_kl_orient ARGS… — `kronicle-lite orient --json` for this session's actor,
+# bounded by push_timeout. Prints the JSON; non-zero on failure / timeout.
+cc_kl_orient() {
+  local to; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --cwd "$CC_ROOT")
+  [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null
+  else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
+}
+
+cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
+  local now; cc_epoch_now_var now
+  printf '%s\n' "$now" > "$CC_KL_B.fail" 2>/dev/null || true
+  CC_KL_FAILED=1
+  if [[ "$1" == 124 ]]; then cc_log_once kl_timeout "push: kronicle-lite orient timed out (push_timeout); failing open"
+  else cc_log_once kl_err "push: kronicle-lite orient failed (exit $1); failing open"; fi
+}
+
+cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
+  [[ -s "$CC_KL_B.fail" ]] || return 1
+  local t now; IFS= read -r t < "$CC_KL_B.fail" || t=0
+  cc_epoch_now_var now
+  [[ "$t" =~ ^[0-9]+$ ]] && (( now - t < 60 )) && CC_KL_FAILED=1
+}
+
+# cc_kl_init — start this session's cursor at the current head (silent).
+cc_kl_init() {
+  cc_kl_backoff && return 1
+  local pre="$CC_KL_B.stamp.$$" out rc cur seq
+  : > "$pre" 2>/dev/null || return 1
+  out="$(cc_kl_orient --focus pulse)"; rc=$?
+  if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
+  IFS=$'\x1f' read -r cur seq < <(jq -r '[(.cursor // ""), ((.head.seq // "") | tostring)] | join("\u001f")' <<<"$out" 2>/dev/null)
+  if [[ -z "$cur" ]]; then rm -f "$pre"; cc_kl_fail 2; return 1; fi
+  printf '%s\n' "$cur" > "$CC_KL_B.cursor" && printf '%s\n' "$seq" > "$CC_KL_B.seq" && mv -f "$pre" "$CC_KL_B.stamp"
+  rm -f "$pre" "$CC_KL_B.fail" 2>/dev/null
+  return 0
+}
+
+# 0 when the store cannot have changed since the stamp (builtins only).
+cc_kl_unchanged() {
+  [[ -e "$CC_KL_B.stamp" ]] || return 1
+  local db="${CC_KL_DD:-${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}}/kronicle-lite.db"
+  [[ -e "$db" ]] || return 1
+  [[ "$db" -ot "$CC_KL_B.stamp" ]] || return 1
+  [[ ! -e "$db-wal" || "$db-wal" -ot "$CC_KL_B.stamp" ]]
+}
+
+# cc_kl_fetch — new retractions since this session's cursor. Returns 0 when
+# the head moved and the retractions were fetched (KL_SHOWN may still be 0),
+# 1 when nothing changed, the CLI failed (fail open) or no cursor existed yet.
+# Sets KL_BODY ("- …" lines), KL_SHOWN, KL_BLOCK, KL_COS, KL_SEQ.
+cc_kl_fetch() {
+  KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
+  if [[ ! -s "$CC_KL_B.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
+  cc_kl_unchanged && return 1
+  cc_kl_backoff && return 1
+  local pre="$CC_KL_B.stamp.$$" out rc seq stored="" cur=""
+  : > "$pre" 2>/dev/null || return 1
+  out="$(cc_kl_orient --focus pulse)"; rc=$?
+  if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
+  seq="$(jq -r '.head.seq // empty' <<<"$out" 2>/dev/null)"
+  [[ -s "$CC_KL_B.seq" ]] && IFS= read -r stored < "$CC_KL_B.seq"
+  if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; return 1; fi
+  IFS= read -r cur < "$CC_KL_B.cursor"
+  out="$(cc_kl_orient --cursor "$cur" --focus retractions)"; rc=$?
+  if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
+  local sc=0; cc_on push_cosmetic 0 && sc=1
+  local parsed
+  parsed="$(jq -r --arg show_cosmetic "$sc" -f "$CC_LIB_DIR/retractions.jq" <<<"$out" 2>/dev/null)" || { rm -f "$pre"; cc_kl_fail 3; return 1; }
+  local ncur counts rest
+  ncur="${parsed%%$'\n'*}"; rest="${parsed#*$'\n'}"
+  KL_SEQ="${rest%%$'\n'*}"; rest="${rest#*$'\n'}"
+  counts="${rest%%$'\n'*}"
+  if [[ "$rest" == *$'\n'* ]]; then KL_BODY="${rest#*$'\n'}"; else KL_BODY=""; fi
+  read -r KL_SHOWN KL_BLOCK KL_COS <<<"$counts"
+  [[ "$KL_SHOWN" =~ ^[0-9]+$ ]] || KL_SHOWN=0
+  [[ "$KL_BLOCK" =~ ^[0-9]+$ ]] || KL_BLOCK=0
+  [[ "$KL_COS" =~ ^[0-9]+$ ]] || KL_COS=0
+  if [[ -n "$ncur" ]]; then
+    printf '%s\n' "$ncur" > "$CC_KL_B.cursor.$$" && mv -f "$CC_KL_B.cursor.$$" "$CC_KL_B.cursor"
+    printf '%s\n' "$KL_SEQ" > "$CC_KL_B.seq"
+  fi
+  mv -f "$pre" "$CC_KL_B.stamp"
+  rm -f "$CC_KL_B.fail" 2>/dev/null
+  return 0
+}
+
+# cc_kl_push <PostToolUse payload> — sets CC_KL_CONTEXT (empty: say nothing).
+CC_KL_CONTEXT=""
+cc_kl_push() {
+  local payload="$1" sid=""
+  CC_KL_CONTEXT=""
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  cc_kl_session "$sid"
+  [[ -e "$CC_KL_B.off" ]] && return 0
+  cc_kl_enabled || return 0
+  # The agent got a tool call in since the last push: what it was told is no
+  # longer "unacted on".
+  [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
+  cc_kl_fetch || return 0
+  (( KL_SHOWN > 0 )) || return 0
+  CC_KL_CONTEXT="cc-anchor: kronicle-lite changed while you were working — ${KL_SHOWN} retraction(s) since your last check (head seq ${KL_SEQ}). Anything you read before this may be stale:
+${KL_BODY}
+Re-read the affected document (recall, or get_system_state with your cursor) and use the current text before you act on it."
+  if (( KL_COS > 0 )) && ! cc_on push_cosmetic 0; then CC_KL_CONTEXT="${CC_KL_CONTEXT} (${KL_COS} cosmetic edit(s) not shown.)"; fi
+  (( KL_BLOCK > 0 )) && printf '%s\n' "$KL_BODY" > "$CC_KL_B.pending"
+  cc_log "push: ${KL_SHOWN} retraction(s) (${KL_BLOCK} blocking, ${KL_COS} cosmetic) at seq ${KL_SEQ}"
+  return 0
+}

@@ -27,6 +27,13 @@
 # session, `sea-lite heartbeat --session <session_id>` runs in the
 # background and renews the session's live claims (cc_sea_heartbeat), so a
 # task longer than one lease keeps its lock. When not due: builtins only.
+#
+# Extra, WITH kronicle-lite (0.4.0): retraction push (cc_kl_push, config
+# `push`, auto = on when kronicle-lite is configured). New retractions since
+# this session's cursor are injected next to the tool result:
+#   {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}
+# Hot path when the store has not changed: two builtin mtime tests. Otherwise
+# one or two bounded `kronicle-lite orient --json` calls; fail-open.
 set -u
 CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HERE=.
 # shellcheck source=./lib.sh
@@ -46,4 +53,6 @@ cc_resolve "${root:-$PWD}"
 cc_render "$input"
 cc_claims_update "$input"
 cc_sea_heartbeat "$input"
+cc_kl_push "$input"
+[[ -n "$CC_KL_CONTEXT" ]] && cc_emit_context PostToolUse "$CC_KL_CONTEXT"
 exit 0

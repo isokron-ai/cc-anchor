@@ -4,6 +4,65 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [Unreleased]
+
+The one strong live-agent result from agent-memory-bench Track B, shipped:
+T1 (the runbook changes mid-session) went 0/36 for every pull setup and
+10/10 with a retraction push prototype. Needs kronicle-lite ≥ 0.5.0; inert
+without it.
+
+### Added
+- **Retraction push** (`PostToolUse`, switch `push`, auto = on when
+  kronicle-lite is configured). Each session keeps its own kronicle-lite
+  cursor (`.claude/cc-anchor/push/<sid8>.cursor`, started at the head on
+  `SessionStart`, kept across compaction and resume). After a tool call
+  that saw the store change, `kronicle-lite orient --cursor <c> --focus
+  retractions --json` runs, the cursor is advanced and persisted, and the
+  new retractions are injected as `additionalContext`: what the agent relied
+  on, what it says now, the word diff (≤ 6 lines). Retractions kronicle-lite
+  marks cosmetic (`cosmetic: true` / `change_class: "cosmetic"`) are counted,
+  hidden unless `push_cosmetic`, and never block; without the flag
+  everything counts as semantic.
+- **Pulse before world-changing commands** (`PreToolUse` on `Bash`, switch
+  `pulse`, auto with the push). Commands matching `pulse_match` (default
+  `deploy|migrate|publish|release|git push|terraform apply|kubectl apply`;
+  word boundaries added; quoted text and read-only heads ignored) are denied
+  with the diff in the reason while a semantic safety/behavioral retraction
+  is unreconciled: one that landed after the last tool call, or one the push
+  delivered on the previous tool result with no tool call since. The
+  re-run is allowed. `pulse_mode: warn` turns the deny into context.
+- **Chained commands** (Track B F2: the push only fires between tool calls,
+  so `build && migrate && deploy` deployed stale when the change landed
+  during the build): with `pulse_chain: split` (default) a call that runs a
+  world-changing step after another non-inert step is denied once with
+  "run it as its own Bash call"; `cd`/`export`/`echo`/read-only steps do not
+  count. `pulse_chain: check` allows chains.
+- Config `push_timeout` (3 s per CLI call), `kronicle_data_dir` (else the
+  kronicle MCP server's `--data-dir` / `KRONICLE_LITE_DATA_DIR` from
+  `.mcp.json` or `~/.claude.json`, else the CLI default).
+- **Contract tests against the real kronicle-lite CLI**
+  (`tests/kronicle-contract.test.mjs`; `$KRONICLE_LITE_CLI`,
+  `node_modules/kronicle-lite` or `../kronicle-lite`; fail, not skip, unless
+  `CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1`), passing on 0.5.0 and 0.6.0; unit
+  tests for the command lexer, the renderer and every fail-open path
+  (`tests/push.test.mjs`). CI installs `kronicle-lite@0.6.0`.
+- A contract test that the lease heartbeat is on by default once the
+  session holds sea-lite claims, with no switch set (Track A S13: without
+  it a lease lapsed mid-task 3/3; with it 3/3 survived).
+
+### Changed
+- Hot path: while `kronicle-lite.db` and its `-wal` are older than the
+  session's stamp the push costs two builtin `-ot` tests (no process); a
+  change costs one read-only `orient --focus pulse` and, if the head moved,
+  one `orient --focus retractions`. Every call is bounded (`push_timeout`)
+  with the existing portable watchdog; any failure fails open, logs one
+  line and backs off for 60 s.
+- `SessionStart`, `PostToolUse` and the new Bash `PreToolUse` entries keep
+  a 10 s hook timeout (two bounded CLI calls fit).
+- `npm test` runs test files one at a time (`--test-concurrency=1`): the
+  contract tests spawn real CLIs and made the hot-path timing budgets flaky
+  on 2-core runners.
+
 ## [0.3.0] — 2026-11-01
 
 Fixes from the adoption audit (B1, B2, B5 on the cc-anchor side). Needs
