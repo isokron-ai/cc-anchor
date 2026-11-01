@@ -17,8 +17,8 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck
       - name: Lint
         run: npm run lint
-      - name: Install the real sea-lite CLI for the contract tests
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
+      - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0
       - name: Test
         run: npm test
       - name: Hook hot-path timing
@@ -37,6 +37,9 @@ jobs:
           echo "$pre" | bash scripts/pre-tool-use.sh
           start=$(date +%s%N); for i in $(seq 10); do echo "$pre" | bash scripts/pre-tool-use.sh; done; end=$(date +%s%N)
           echo "PreToolUse (scope guard on, cached verdict) mean: $(( (end - start) / 10000000 )) ms"
+          bash_pre='{"session_id":"ci","cwd":"/tmp/proj","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"./bin/deploy --target x"}}'
+          start=$(date +%s%N); for i in $(seq 10); do echo "$bash_pre" | bash scripts/pulse.sh; done; end=$(date +%s%N)
+          echo "PreToolUse pulse (kronicle-lite not configured) mean: $(( (end - start) / 10000000 )) ms"
           cat /tmp/proj/.claude/anchor.md
 
   validate:
@@ -60,7 +63,7 @@ jobs:
           node-version: 22
       - name: Install jq
         run: brew install jq
-      - name: Install the real sea-lite CLI for the contract tests
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
+      - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0
       - name: Test on macOS (BSD date, Homebrew bash)
         run: npm test

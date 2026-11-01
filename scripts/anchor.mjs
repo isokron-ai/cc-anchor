@@ -115,6 +115,15 @@ export const CONFIG_KEYS = {
   heartbeat_interval: { default: 60, hook: 'PostToolUse', doc: 'minimum seconds between two lease heartbeats per session' },
   sea_session: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'session to act as instead of the hook\'s session_id (Cursor: the --session your sea-lite server runs with)' },
   sea_actor: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'pass --actor to sea-lite (default: the session\'s own server actor; every claim of the session counts as yours)' },
+  push: { default: 'auto', hook: 'PostToolUse', doc: 'inject kronicle-lite retractions that landed since the last tool call (auto = when kronicle-lite is configured)' },
+  push_timeout: { default: 3, hook: 'PostToolUse/PreToolUse', doc: 'seconds per kronicle-lite orient call before the push/pulse fails open' },
+  push_offline_after: { default: 20, hook: 'PostToolUse', doc: 'consecutive calls the kronicle-lite feed may be unreadable (CLI missing / failing / timing out) before one "feed offline" advisory; 0 = never' },
+  push_cosmetic: { default: false, hook: 'PostToolUse/PreToolUse', doc: 'also show retractions kronicle-lite marks cosmetic (they never block)' },
+  pulse: { default: 'auto', hook: 'PreToolUse (Bash)', doc: 'check retractions before world-changing Bash commands (auto = with the push)' },
+  pulse_match: { default: 'deploy|migrate|publish|release|git push|terraform apply|kubectl apply', hook: 'PreToolUse (Bash)', doc: 'regex for world-changing commands (word boundaries added; quoted text ignored)' },
+  pulse_mode: { default: 'deny', hook: 'PreToolUse (Bash)', doc: 'deny | warn when an unreconciled semantic retraction exists' },
+  pulse_chain: { default: 'split', hook: 'PreToolUse (Bash)', doc: 'split = deny a call that runs a world-changing step after other steps (run it on its own); check = allow' },
+  kronicle_data_dir: { default: '', hook: 'PostToolUse/PreToolUse', doc: 'kronicle-lite store the push reads (default: the kronicle MCP server\'s --data-dir, else $KRONICLE_LITE_DATA_DIR, else ~/.kronicle-lite)' },
 };
 
 export function readConfig(p) {
@@ -192,6 +201,11 @@ export function findCli(name, env = process.env) {
   const dirs = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
   for (const mk of dirs(cache)) for (const plug of dirs(path.join(cache, mk))) for (const ver of dirs(path.join(cache, mk, plug))) {
     const f = path.join(cache, mk, plug, ver, 'node_modules', name, 'dist', 'cli.js');
+    if (fs.existsSync(f)) return f;
+  }
+  const npx = path.join(env.npm_config_cache || path.join(home, '.npm'), '_npx');
+  for (const h of dirs(npx)) {
+    const f = path.join(npx, h, 'node_modules', name, 'dist', 'cli.js');
     if (fs.existsSync(f)) return f;
   }
   return null;

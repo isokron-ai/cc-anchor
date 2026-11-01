@@ -4,6 +4,99 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [Unreleased]
+
+The one strong live-agent result from agent-memory-bench Track B, shipped:
+T1 (the runbook changes mid-session) went 0/36 for every pull setup and
+10/10 with a retraction push prototype. Needs kronicle-lite ≥ 0.5.0; inert
+without it.
+
+### Added
+- **Retraction push** (`PostToolUse`, switch `push`, auto = on when
+  kronicle-lite is configured). Each session keeps its own kronicle-lite
+  cursor (`.claude/cc-anchor/push/<sid8>.cursor`, started at the head on
+  `SessionStart`, kept across compaction and resume). After a tool call
+  that saw the store change, `kronicle-lite orient --cursor <c> --focus
+  retractions --json` runs, the cursor is advanced and persisted, and the
+  new retractions are injected as `additionalContext`: what the agent relied
+  on, what it says now, the word diff (≤ 6 lines). Retractions kronicle-lite
+  marks cosmetic (`cosmetic: true` / `change_class: "cosmetic"`) are counted,
+  hidden unless `push_cosmetic`, and never block; without the flag
+  everything counts as semantic.
+- **Pulse before world-changing commands** (`PreToolUse` on `Bash`, switch
+  `pulse`, auto with the push). Commands matching `pulse_match` (default
+  `deploy|migrate|publish|release|git push|terraform apply|kubectl apply`;
+  word boundaries added; quoted text and read-only heads ignored) are denied
+  with the diff in the reason while a semantic safety/behavioral retraction
+  is unreconciled: one that landed after the last tool call, or one the push
+  delivered on the previous tool result with no tool call since. The
+  re-run is allowed. `pulse_mode: warn` turns the deny into context.
+- **Chained commands** (Track B F2: the push only fires between tool calls,
+  so `build && migrate && deploy` deployed stale when the change landed
+  during the build): with `pulse_chain: split` (default) a call that runs a
+  world-changing step after another non-inert step is denied once with
+  "run it as its own Bash call"; `cd`/`export`/`echo`/read-only steps do not
+  count. `pulse_chain: check` allows chains.
+- The kronicle-lite / sea-lite CLI is also found in the npx cache
+  (`~/.npm/_npx/*/node_modules/<name>/dist/cli.js`): the isokron-plugins
+  marketplace launches its servers with `npx -y <name>@<pin> serve`, so a
+  plugin-only install has the CLI nowhere else.
+- Config `push_timeout` (3 s per CLI call), `kronicle_data_dir` (else the
+  kronicle MCP server's `--data-dir` / `KRONICLE_LITE_DATA_DIR` from
+  `.mcp.json` or `~/.claude.json`, else the CLI default).
+- **Contract tests against the real kronicle-lite CLI**
+  (`tests/kronicle-contract.test.mjs`; `$KRONICLE_LITE_CLI`,
+  `node_modules/kronicle-lite` or `../kronicle-lite`; fail, not skip, unless
+  `CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1`), passing on 0.5.0 and 0.6.0; unit
+  tests for the command lexer, the renderer and every fail-open path
+  (`tests/push.test.mjs`). CI installs `kronicle-lite@0.6.0`.
+- A contract test that the lease heartbeat is on by default once the
+  session holds sea-lite claims, with no switch set (Track A S13: without
+  it a lease lapsed mid-task 3/3; with it 3/3 survived).
+
+### Changed
+- Hot path: while `kronicle-lite.db` and its `-wal` are older than the
+  session's stamp the push costs two builtin `-ot` tests (no process); a
+  change costs one read-only `orient --focus pulse` and, if the head moved,
+  one `orient --focus retractions`. Every call is bounded (`push_timeout`)
+  with the existing portable watchdog; any failure fails open, logs one
+  line and backs off for 60 s.
+- **A corrupt store is reported, not silently skipped** (stress finding
+  S2). When an orient result says `integrity.ok === false`, the push
+  injects one top-priority warning per distinct problem ("kronicle-lite
+  STORE INTEGRITY FAILURE at seq N: <problem>; do not act on recalled
+  runbooks…"), delivers no retractions from that store (the cursor stays
+  put; they arrive after a repair), and the pulse denies world-changing
+  commands until a fresh read says ok (`pulse_mode: warn` still only
+  warns). kronicle-lite ≤ 0.6.0 throws on a corrupt event instead; that
+  lands in the "unavailable" path below.
+- **Pulse matcher hardened** (stress corpus: 11/37 world-changing forms
+  were missed). Each pipeline stage is tokenized with shell-ish quoting
+  (quotes stripped from the command name, whitespace and tabs collapsed),
+  wrappers are dropped with their options (`sudo -E`, `env -i A=b`,
+  `nice -n`, `timeout 600`), and the tool's global options are skipped
+  before matching: git `-C x`, `-c k=v`, `--no-pager`, `-P`,
+  `--git-dir=`, `--work-tree=`; kubectl `-n/--namespace x`, `--context x`,
+  `--kubeconfig x`, `-A`; terraform `-chdir=`; npm `--prefix x`, `-w x`;
+  helm, make. Read-only verbs behind global options stay quiet
+  (`git --no-pager log --grep=release`). The code of interpreter one-liners
+  (`python -c`, `node -e/-p`, `perl/ruby -e`, `bash/sh/zsh -c`, `eval`) is
+  scanned, and a world-changing one is **denied once** (fail closed; the
+  identical retry runs). Corpus: 37/37 detected, 0/8 false alarms; ported
+  into `tests/push.test.mjs`. Defence in depth only: the exec-time
+  boundary is a shim on PATH (next cycle).
+- **"Feed offline" advisory.** A kronicle-lite that cannot be read (CLI
+  missing from the cache, crash, timeout, non-JSON output) still fails
+  open and is logged; after `push_offline_after` (20) consecutive calls in
+  that state the agent gets one advisory that retractions are not being
+  pushed and it must re-read sources itself. Resets when the store is
+  readable again; `0` disables it.
+- `SessionStart`, `PostToolUse` and the new Bash `PreToolUse` entries keep
+  a 10 s hook timeout (two bounded CLI calls fit).
+- `npm test` runs test files one at a time (`--test-concurrency=1`): the
+  contract tests spawn real CLIs and made the hot-path timing budgets flaky
+  on 2-core runners.
+
 ## [0.3.0] — 2026-11-01
 
 Fixes from the adoption audit (B1, B2, B5 on the cc-anchor side). Needs

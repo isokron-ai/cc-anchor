@@ -156,6 +156,24 @@ test('PostToolUse heartbeat (real CLI): renews this session’s claims, rate-lim
   } finally { sb.cleanup(); }
 });
 
+test('PostToolUse heartbeat (real CLI) is ON BY DEFAULT once the session holds claims — no CC_ANCHOR_HEARTBEAT / CC_ANCHOR_SEA (Track A S13)', opts, () => {
+  const { sb, env, guard, id, expiry } = seeded({ lease: 120 });
+  try {
+    const before = expiry();
+    const post = () => hook('post-tool-use.sh', { session_id: 'sess-A', cwd: sb.proj, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'make' }, tool_response: {} }, env, { CC_ANCHOR_SEA_LITE_BIN: SEA_CLI, KRONICLE_LITE_DATA_DIR: guard.KRONICLE_LITE_DATA_DIR, CC_ANCHOR_SYNC: '1' });
+    spawnSync('sleep', ['1.1']);
+    assert.equal(post().status, 0);
+    assert.equal(expiry(), before, 'no claims seen and sea-lite not configured: the heartbeat stays off');
+    // What the PostToolUse claim tracker writes after a sea_claim by this session.
+    fs.mkdirSync(sb.run, { recursive: true });
+    fs.writeFileSync(path.join(sb.run, 'claims.json'), JSON.stringify({ claims: { [id]: { claim_token: 'tok', expires: '2099-01-01T00:00:00Z', agent: '', session: 'sess-A', taken: '2026-11-01T00:00:00Z' } } }));
+    fs.rmSync(path.join(sb.run, 'hb-sessA'), { force: true });
+    spawnSync('sleep', ['1.1']);
+    assert.equal(post().stdout, '');
+    assert.ok(Date.parse(expiry()) > Date.parse(before), 'claims present: renewed with no switch set');
+  } finally { sb.cleanup(); }
+});
+
 test('scope guard: a sea-lite older than 0.4.0 (no JSON contract) fails open and says why, once', opts, () => {
   const sb = sandbox();
   try {

@@ -41,10 +41,17 @@ CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HE
 cc_have_jq || exit 0
 
 input="$(cat 2>/dev/null || true)"
-IFS=$'\x1f' read -r source_kind cwd secs cache_expired < <(jq -r '[(.source // "startup"), (.cwd // ""), ((.seconds_since_last_response // "") | tostring), ((.prompt_cache_likely_expired // "") | tostring)] | map(gsub("[\\x1f\\n]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null) || { source_kind=startup; cwd=""; secs=""; cache_expired=""; }
+IFS=$'\x1f' read -r source_kind cwd secs cache_expired sid < <(jq -r '[(.source // "startup"), (.cwd // ""), ((.seconds_since_last_response // "") | tostring), ((.prompt_cache_likely_expired // "") | tostring), (.session_id // "")] | map(gsub("[\\x1f\\n]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null) || { source_kind=startup; cwd=""; secs=""; cache_expired=""; sid=""; }
 source_kind="${source_kind:-startup}"
 
 cc_resolve "${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+
+# 0.4.0 retraction push: start this session's kronicle-lite cursor at the
+# current head, so the first PostToolUse already knows what is "new". Kept
+# across compaction / resume (the cursor is per session). Silent; bounded by
+# push_timeout; fail-open.
+cc_kl_session "$sid"
+if [[ ! -s "$CC_KL_B.cursor" ]] && cc_kl_enabled; then cc_kl_init || true; fi
 
 if [[ "$source_kind" != "compact" && ! -s "$CC_CARD" ]]; then
   # Nothing to anchor on yet; stay silent rather than nag on every startup.
