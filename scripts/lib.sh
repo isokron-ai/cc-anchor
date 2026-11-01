@@ -651,7 +651,7 @@ cc_kl_seed() {
 # cc_kl_forget — drop a stopped subagent's cursor files.
 cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
-  rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" 2>/dev/null || true
+  rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" 2>/dev/null || true
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.

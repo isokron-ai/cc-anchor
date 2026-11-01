@@ -107,6 +107,21 @@ without it.
   commands until a fresh read says ok (`pulse_mode: warn` still only
   warns). kronicle-lite ≤ 0.6.0 throws on a corrupt event instead; that
   lands in the "unavailable" path below.
+- **Pulse matcher hardened** (stress corpus: 11/37 world-changing forms
+  were missed). Each pipeline stage is tokenized with shell-ish quoting
+  (quotes stripped from the command name, whitespace and tabs collapsed),
+  wrappers are dropped with their options (`sudo -E`, `env -i A=b`,
+  `nice -n`, `timeout 600`), and the tool's global options are skipped
+  before matching: git `-C x`, `-c k=v`, `--no-pager`, `-P`,
+  `--git-dir=`, `--work-tree=`; kubectl `-n/--namespace x`, `--context x`,
+  `--kubeconfig x`, `-A`; terraform `-chdir=`; npm `--prefix x`, `-w x`;
+  helm, make. Read-only verbs behind global options stay quiet
+  (`git --no-pager log --grep=release`). The code of interpreter one-liners
+  (`python -c`, `node -e/-p`, `perl/ruby -e`, `bash/sh/zsh -c`, `eval`) is
+  scanned, and a world-changing one is **denied once** (fail closed; the
+  identical retry runs). Corpus: 37/37 detected, 0/8 false alarms; ported
+  into `tests/push.test.mjs`. Defence in depth only: the exec-time
+  boundary is a shim on PATH (next cycle).
 - **"Feed offline" advisory.** A kronicle-lite that cannot be read (CLI
   missing from the cache, crash, timeout, non-JSON output) still fails
   open and is logged; after `push_offline_after` (20) consecutive calls in

@@ -10,15 +10,26 @@
 #                           segment runs BEFORE in the same Bash call (a change
 #                           that lands while that one runs is invisible to a
 #                           check made before the call),
+#     oneliner: [<segment>…] world-changing code inside an interpreter one-liner
+#                           (python -c, node -e, perl/ruby -e, bash/sh/zsh -c,
+#                           eval): the pulse cannot see when it runs; denied once,
 #     head: "<first world-changing segment, ≤ 120 chars>" }
 #
 # Segmentation is a small shell lexer, not a parser: it splits on && || ; &
 # and newlines outside quotes, parentheses and comments; a pipeline stays one
 # segment; `$(…)` stays inside its segment; ( ) and { } groups are split
-# through. Quoted text is invisible to the match (`git commit -m "release"`
-# is not a release) except for opaque runners (bash -c, sh -c, eval, ssh,
-# xargs), whose whole text is matched. Read-only heads (grep, cat, ls, git
-# log …) never count as world-changing.
+# through. Each pipeline stage is then tokenized (quotes removed, whitespace
+# collapsed), wrappers and their options are dropped (sudo -E, env -i, nice -n,
+# timeout 600 …), and the tool's own global options are skipped before the
+# match (`git -C x --no-pager push` → `git push`, `kubectl -n prod apply`,
+# `terraform -chdir=infra apply`, `npm --prefix x publish`). Quoted ARGUMENTS
+# stay invisible (`git commit -m "release"` is not a release); a quoted command
+# name is not (`"git" push`). The code of interpreter one-liners is matched
+# (python -c, node -e, perl/ruby -e, bash/sh/zsh -c, eval), as is the whole
+# text of ssh / xargs. Read-only commands (grep, cat, ls, git log …) never
+# count as world-changing. This is defence in depth: a command the regex does
+# not name, or one that runs inside a script, is only caught by an exec-time
+# check (kronicle-lite shims).
 
 def lex:
   explode as $a
@@ -49,31 +60,92 @@ def lex:
   | map({raw: (.raw | gsub("^\\s+|\\s+$"; "")), bare: (.bare | gsub("^\\s+|\\s+$"; ""))})
   | map(select(.raw != ""));
 
-# Command words with leading assignments and transparent wrappers removed.
-def words:
-  [.bare | splits("\\s+") | select(. != "")]
-  | until((length == 0) or ((.[0] | test("^[A-Za-z_][A-Za-z0-9_]*=")) or (.[0] | IN("sudo", "env", "time", "nohup", "command", "exec", "nice", "{", "!")) | not); .[1:]);
+# Words of one pipeline stage with shell-ish quoting: {w: text with quotes
+# removed, q: true when any part was quoted}. Whitespace (spaces, tabs) is
+# collapsed; `|` outside quotes ends a stage.
+def stages:
+  explode as $a
+  | reduce range(0; $a | length) as $i (
+      {st: [], ws: [], cur: null, q: null, esc: false};
+      ($a[$i] | [.] | implode) as $c
+      | if .esc then .esc = false | .cur = ((.cur // {w: "", q: false}) | .w += $c)
+        elif .q == "'" then (if $c == "'" then .q = null else .cur.w += $c end)
+        elif .q == "\"" then (if $c == "\"" then .q = null elif $c == "\\" then .esc = true else .cur.w += $c end)
+        elif $c == "\\" then .esc = true
+        elif $c == "'" or $c == "\"" then .q = $c | .cur = ((.cur // {w: "", q: false}) | .q = true)
+        elif $c | test("\\s") then (if .cur != null then .ws += [.cur] | .cur = null else . end)
+        elif $c == "|" then (if .cur != null then .ws += [.cur] | .cur = null else . end) | .st += [.ws] | .ws = []
+        else .cur = ((.cur // {w: "", q: false}) | .w += $c)
+        end)
+  | (if .cur != null then .ws += [.cur] else . end)
+  | .st + [.ws];
 
 def base: sub("^.*/"; "");
 
+# Drop leading assignments and transparent wrappers WITH their own options
+# (sudo -E, env -i A=b, nice -n 10, timeout 600, time, nohup, command, exec).
+def unwrap:
+  if length == 0 then .
+  elif (.[0].q | not) and (.[0].w | test("^[A-Za-z_][A-Za-z0-9_]*=")) then .[1:] | unwrap
+  elif .[0].w | IN("time", "nohup", "command", "exec", "!", "{", "(") then .[1:] | unwrap
+  elif .[0].w == "sudo" then .[1:] | until(length == 0 or (.[0].w | startswith("-") | not); if .[0].w | IN("-u", "-g", "-C", "-h", "-p", "-r", "-t") then .[2:] else .[1:] end) | unwrap
+  elif .[0].w == "env" then .[1:] | until(length == 0 or ((.[0].w | startswith("-")) or (.[0].w | test("^[A-Za-z_][A-Za-z0-9_]*=")) | not); if .[0].w | IN("-u", "-C", "-S") then .[2:] else .[1:] end) | unwrap
+  elif .[0].w == "nice" then .[1:] | (if (.[0].w // "") == "-n" then .[2:] elif (.[0].w // "") | test("^-") then .[1:] else . end) | unwrap
+  elif .[0].w == "timeout" then .[1:] | until(length == 0 or (.[0].w | startswith("-") | not); if .[0].w | IN("-s", "-k", "--signal", "--kill-after") then .[2:] else .[1:] end) | .[1:] | unwrap
+  else . end;
+
+# Skip a tool's global options so `git -C x push`, `kubectl -n prod apply`,
+# `terraform -chdir=infra apply` read as `git push` / `kubectl apply` / …
+def skipopts($tool):
+  def go($val; $flags):
+    until(length == 0 or (.[0].w | startswith("-") | not);
+      if (.[0].w | IN($val[])) then .[2:] else .[1:] end);
+  if $tool == "git" then go(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"]; [])
+  elif $tool == "kubectl" or $tool == "oc" then go(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user", "-s", "--server", "--as", "--as-group", "--token", "--request-timeout", "-v", "--certificate-authority"]; [])
+  elif $tool == "terraform" or $tool == "tofu" then go([]; [])
+  elif $tool == "npm" or $tool == "pnpm" or $tool == "yarn" then go(["--prefix", "-w", "--workspace", "-C", "--dir", "--cwd", "--filter"]; [])
+  elif $tool == "helm" then go(["-n", "--namespace", "--kube-context", "--kubeconfig"]; [])
+  elif $tool == "make" then go(["-C", "-f", "--directory", "--file", "-j"]; [])
+  else . end;
+
+# Interpreter one-liners: the code string they run (null when not one).
+def oneliner_code:
+  (.[0].w | base) as $x
+  | (if $x | test("^(bash|sh|zsh|dash|ksh)$") then ["-c"]
+     elif $x | test("^python[0-9.]*$") then ["-c"]
+     elif $x | test("^(node|nodejs|deno|bun)$") then ["-e", "-p", "--eval", "--print"]
+     elif $x | test("^(perl|ruby)$") then ["-e", "-E"]
+     else null end) as $flags
+  | if $x == "eval" then (.[1:] | map(.w) | join(" "))
+    elif $flags == null then null
+    else (. as $w | [range(1; length) | select(($w[.].w | IN($flags[])) or ($flags == ["-c"] and ($w[.].w | test("^-[A-Za-z]*c$"))))] | first) as $i
+      | if $i == null then null else (.[$i + 1].w // "") end
+    end;
+
 def part($re; $raw):
-  ({bare: .} | words) as $w
-  | ($w[0] // "" | base) as $h
-  | ($w[1] // "") as $h2
+  (unwrap) as $u
+  | ($u[0].w // "" | base) as $h
+  | ([$h] + ($u[1:] | skipopts($h) | map(if .q then "Q" else .w end))) as $cw
+  | ($cw[1] // "") as $h2
+  | ($cw | join(" ")) as $canon
   | ($h | IN("cd", "pushd", "popd", "export", "unset", "set", "source", ".", "true", ":", "echo", "printf", "test", "[", "[[", "alias", "umask", "ulimit", "local", "declare", "shopt")) as $builtin
   | (($h | IN("grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "bat", "less", "more", "head", "tail", "ls", "man", "which", "type", "wc", "file", "stat", "diff", "jq", "yq", "tree", "pwd", "whoami", "date"))
      or ($h == "git" and ($h2 | IN("log", "show", "diff", "status", "grep", "blame", "branch", "remote", "rev-parse", "fetch")))) as $readonly
-  | ($h | IN("bash", "sh", "zsh", "dash", "eval", "ssh", "xargs")) as $opaque
+  | ($u | oneliner_code) as $code
+  | ($code != null and ($code | test($re))) as $oneliner
+  | ($h | IN("ssh", "xargs")) as $opaque
   | {inert: ($builtin or $readonly or $h == ""),
-     world: ((($builtin or $readonly) | not) and ((if $opaque then $raw else . end) | test($re)))};
+     oneliner: $oneliner,
+     world: ($oneliner or ((($builtin or $readonly) | not) and (($canon | test($re)) or ($opaque and ($raw | test($re))))))};
 
 # A segment is a pipeline: world-changing when any stage is (or a $( ) runs
 # one), inert when every stage is.
 def classify($re):
   . as $s
-  | [$s.bare | split("|")[] | part($re; $s.raw)] as $p
+  | [$s.raw | stages[] | select(length > 0) | part($re; $s.raw)] as $p
   | {raw: $s.raw,
      inert: ($p | all(.inert)),
+     oneliner: ($p | any(.oneliner)),
      world: (($p | any(.world)) or ([$s.raw | scan("\\$\\(([^)]*)\\)|`([^`]*)`") | map(. // "") | join(" ")] | join(" ") | test($re)))};
 
 ($match | gsub("\\\\\\\\"; "\\")) as $m
@@ -82,4 +154,5 @@ def classify($re):
 | ($segs | map(.world) | index(true)) as $first
 | {world: [$segs[] | select(.world) | .raw],
    risky: [range(0; $segs | length) as $i | select($segs[$i].world and ($segs[0:$i] | any(.inert | not))) | $segs[$i].raw],
+   oneliner: [$segs[] | select(.oneliner) | .raw | .[0:120]],
    head: (if $first == null then "" else ($segs[$first].raw | .[0:120]) end)}

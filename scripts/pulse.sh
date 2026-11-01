@@ -19,6 +19,11 @@
 # adds the same text as context instead. Non-blocking news is added as
 # context and the command runs.
 #
+# One-liners: world-changing code inside python -c / node -e / perl -e /
+# ruby -e / bash -c / eval is denied ONCE per command (fail closed); the
+# identical retry runs. The real exec-time boundary is a shim on PATH
+# (kronicle-lite shims); this matcher is defence in depth.
+#
 # Chains (F2): in `a && b && deploy` a change that lands while `b` runs is
 # invisible to any check made before the call, and the PostToolUse push only
 # arrives after the stale deploy. With `pulse_chain: split` (default) a call
@@ -117,6 +122,20 @@ fi
 
 # The store could not be read: fail open (no chain split either).
 (( CC_KL_FAILED == 1 )) && exit 0
+
+# Interpreter one-liners (python -c, node -e, perl/ruby -e, bash/sh/zsh -c,
+# eval) that run a world-changing command: the pulse cannot tell when inside
+# the code it runs, so fail closed ONCE per command; the identical retry runs.
+if [[ "$an" != *'"oneliner":[]'* ]]; then
+  ol="$(jq -r '.oneliner[0] | gsub("[\\r\\n]+"; " ")' <<<"$an" 2>/dev/null)"
+  seen="$CC_KL_B.oneliner"
+  if [[ -n "$ol" ]] && ! { [[ -s "$seen" ]] && grep -Fxq -- "$ol" "$seen" 2>/dev/null; }; then
+    printf '%s\n' "$ol" >> "$seen" 2>/dev/null || true
+    cc_log "pulse: denied once: world-changing one-liner \`${ol:0:60}\`"
+    cc_emit_deny "cc-anchor pulse: did NOT run this call (once) — \`${ol:0:120}\` runs a world-changing command inside an interpreter one-liner, where the pulse cannot check kronicle-lite right before that command runs. Prefer running the world-changing command as its own Bash call. If it has to stay inside the one-liner, run this exact call again: kronicle-lite has nothing unreconciled right now, and the retry is allowed."
+    exit 0
+  fi
+fi
 
 if [[ "$chain" == split && "$an" != *'"risky":[]'* ]]; then
   IFS=$'\x1f' read -r nrisky risky < <(jq -r '[(.risky | length | tostring), (.risky | map("`" + .[0:80] + "`") | join(", "))] | join("\u001f")' <<<"$an" 2>/dev/null)

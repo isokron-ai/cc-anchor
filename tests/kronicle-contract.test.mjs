@@ -255,3 +255,17 @@ test('per-subagent cursors (real CLI): without a SubagentStart the subagent seed
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-a')), 'deny', 'the parent has not seen it either: its own pulse denies');
   } finally { w.sb.cleanup(); }
 });
+
+test('pulse (real CLI): a world-changing interpreter one-liner is denied ONCE; the identical retry runs', opts, () => {
+  const w = world();
+  try {
+    w.start();
+    const cmd = "python3 -c \"import os; os.system('git push origin main')\"";
+    const d = w.pre(cmd);
+    assert.equal(w.decision(d), 'deny');
+    assert.match(w.reason(d), /inside an interpreter one-liner/);
+    assert.match(w.reason(d), /run this exact call again/);
+    assert.equal(w.pre(cmd).stdout, '', 'retry allowed');
+    assert.equal(w.decision(w.pre("node -e \"require('child_process').execSync('npm publish')\"")), 'deny', 'a different one-liner is denied once too');
+  } finally { w.sb.cleanup(); }
+});
