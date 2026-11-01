@@ -38,7 +38,9 @@ export function sandbox({ git = true } = {}) {
     readState: () => JSON.parse(fs.readFileSync(path.join(run, 'state.json'), 'utf8')),
     writeState: (obj) => { fs.mkdirSync(run, { recursive: true }); fs.writeFileSync(path.join(run, 'state.json'), JSON.stringify(obj)); },
     trailLines: () => (fs.existsSync(path.join(run, 'trail.jsonl')) ? fs.readFileSync(path.join(run, 'trail.jsonl'), 'utf8').split('\n').filter(Boolean) : []),
-    cleanup: () => fs.rmSync(base, { recursive: true, force: true }),
+    // Background hooks (lease heartbeat, session doc) may still be writing under
+    // HOME when a test ends (slower macOS runners): retry instead of ENOTEMPTY.
+    cleanup: () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
   };
 }
 
