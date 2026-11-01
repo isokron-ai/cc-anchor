@@ -27,6 +27,10 @@ Claude Code task → sea-lite ticket mirror, an InstructionsLoaded stamp, an
 opt-in worktree pack, and a Cursor port. Everything beyond the card is
 **opt-in** (`cc-anchor.json` / `CC_ANCHOR_*`) and inert for users without
 kronicle-lite or sea-lite. See [Lifecycle hooks pack](#lifecycle-hooks-pack).
+**0.3.0** makes the scope guard actually deny (it speaks sea-lite 0.4.0's
+real contract, tested against the real CLI) and tells two Claude Code
+sessions with the same actor apart, adds a lease heartbeat, and stops the
+`Stop` guard from mixing up sessions.
 
 ## Install
 
@@ -108,7 +112,7 @@ with `claude -p --autocompact 100k` and prints every hook event.
 | `UserPromptSubmit` | — | The bare word `anchor` re-injects the card. Everything else passes through — unless `InstructionsLoaded(compact)` found that the post-compaction injection did not run, in which case the card is re-asserted once with the next prompt. |
 | `Stop` | — | Rotates the trail; once per 30 min, a one-line nudge when the goal is > 45 min stale (`CC_ANCHOR_STOP_WARN=0` to disable). With the pack: claim guard, session document. |
 | `InstructionsLoaded` | `session_start\|compact\|nested_traversal\|path_glob_match\|include` | Stamps which CLAUDE.md / rules files were loaded (`Instructions:` line on the card) and arms the belt-and-braces re-assert after a compaction. Observe-only event. |
-| `PreToolUse` | `Edit\|Write\|MultiEdit\|NotebookEdit` | Scope guard (opt-in): denies an edit inside another actor's live sea-lite claim scope. ~6 ms when off. |
+| `PreToolUse` | `Edit\|Write\|MultiEdit\|NotebookEdit` | Scope guard (opt-in): denies an edit inside someone else's live sea-lite claim (another actor or another session). ~6 ms when off. Does not see Bash-tool edits. |
 | `SubagentStop` | — | Releases, or queues the release of, every sea-lite claim the stopping subagent took (auto when sea-lite is configured). |
 | `TaskCreated` / `TaskCompleted` | — | Task mirror (opt-in): native tasks → sea-lite tickets; completion gated on open predecessors. |
 
@@ -207,7 +211,10 @@ bash pattern matching, so an unset switch costs no `jq` call.
 | `subagent_release` | auto | `SubagentStop` | When the stopping `agent_id` holds live claims: block once with the exact `sea_release` calls, and append them to `pending-release.jsonl`, which the next `SessionStart` / `anchor` re-ground prints as *Pending sea-lite releases*. Auto = on when sea-lite is configured. |
 | `task_mirror` | off | `TaskCreated` / `TaskCompleted` | Mirror native tasks into sea-lite tickets (`kind: chore`, `status: triaged`, tags `cc-task`, `cc-task:<id>`, `idempotency_key: cc-task:<id>`); on completion claim + `sea_transition resolved`. Written through the sea-lite **library** (`scripts/task-mirror.mjs`). |
 | `task_mirror_gate` | on | `TaskCompleted` | With `task_mirror`: exit 2 (completion refused, reason fed back to Claude) while the ticket `depends_on` a non-terminal ticket or a non-terminal ticket `blocks` it. |
-| `scope_guard` | off | `PreToolUse` | Deny `Edit`/`Write` inside another actor's live claim scope: `sea-lite scope-check --paths <file>` → exit 1 + `{conflicts:[{holder,ticket,paths,expires}]}` becomes `permissionDecision: "deny"` naming the holder. Verdicts are cached per path for `scope_ttl` s (30) and the cache is dropped whenever a `sea_*` result passes through PostToolUse. Cached: ~20 ms; cold: one `sea-lite` spawn bounded by `scope_timeout` s (4). A missing binary, an older sea-lite without the subcommand, a crash or a timeout **fail open** and are logged once. |
+| `scope_guard` | off | `PreToolUse` | Deny `Edit`/`Write`/`MultiEdit`/`NotebookEdit` inside someone else's live sea-lite claim — another actor, **or the same actor in another Claude Code session**. Needs sea-lite ≥ 0.4.0: runs `sea-lite scope-check --json --session <session_id> <absolute file>` and turns exit 1 + `{schema:"sea-lite.scope-check/1", conflicts:[{holder_label, ticket_id, title, held, claim_expires_at}]}` into `permissionDecision: "deny"` naming holder, ticket, title, locked paths and expiry. sea-lite maps the hook's `session_id` to the identity this session's MCP server claims under, so the session's own claims (main agent and subagents) never block it. A file outside any repository (`outside_repo`) or in another repository is allowed. Verdicts are cached per **session and path** for `scope_ttl` s (30); the cache is dropped whenever a `sea_*` result passes through PostToolUse. Cached: ~20 ms; cold: one `sea-lite` spawn bounded by `scope_timeout` s (4). A missing binary, a sea-lite older than 0.4.0, a crash or a timeout **fail open** and are logged once. **Bash-tool edits** (`sed -i`, redirects, formatters) never reach this hook; install sea-lite's git guard (`sea-lite precommit --install`) as the backstop. |
+| `heartbeat` | auto | `PostToolUse` | Keep this session's sea-lite leases alive while it works: at most once per `heartbeat_interval` s (60) per session, `sea-lite heartbeat --session <session_id>` runs in the background and renews every live claim of the session by its own lease (a lapsed one is never revived). Auto = on once this project has seen a claim or sea-lite is configured. When not due it costs one builtin file read. |
+| `sea_session` | — | `PreToolUse` / `PostToolUse` | Act as this sea-lite session instead of the hook's `session_id`. Claude Code needs nothing here. **Cursor**: Cursor's conversation id is not the MCP server's session, so start the server with a fixed one (`serve --session cursor-main`) and set `CC_ANCHOR_SEA_SESSION=cursor-main`; otherwise the guard cannot tell the agent's own claims from others' and denies them. |
+| `sea_actor` | — | `PreToolUse` / `PostToolUse` | Pass `--actor` too: then only that actor's claims in the session count as the hook's own (default: every claim of the session). |
 
 Detection: sea-lite is "configured" when `.mcp.json`, `~/.claude.json` or an
 enabled `sea-lite*` plugin mentions it (`CC_ANCHOR_SEA=1|0` overrides), same
@@ -237,7 +244,10 @@ hook matches `^mcp__.*__sea_(claim|next|create|release|transition|refresh)$`
 Each entry records `agent_id` (the common input field Claude Code sets inside
 a subagent), `session_id`, `cwd` (so a removed worktree can find its claims)
 and the lease expiry; expired entries are dropped on every update and never
-count as live. `/cc-anchor:anchor claims` lists them.
+count as live. `/cc-anchor:anchor claims` lists them. `claims.json` is per
+project, shared by every Claude Code session in it, so the `Stop` guard
+only considers the stopping session's own claims (0.3.0; before, a second
+session was shown — and handed the tokens of — the first one's claims).
 
 ### `type: "mcp_tool"` hooks — what the reference allows
 
@@ -339,7 +349,7 @@ Install (project scope — the file is meant to be committed; `--scope user`
 writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
 
 ```sh
-node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.2.0/scripts/anchor.mjs cursor install
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.3.0/scripts/anchor.mjs cursor install
 # or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
 ```
 
@@ -351,7 +361,7 @@ these entries into `.cursor/hooks.json` (existing hooks are kept):
 | `sessionStart` | `session-start.sh` (source `startup`) | card injected as `additional_context` |
 | `preCompact` | `pre-compact.sh` | card written, `compacted_at` stamped |
 | `postToolUse` | `post-tool-use.sh` | trail + claim tracking; `MCP:sea_claim` → `mcp__cursor__sea_claim` |
-| `preToolUse` (matcher `Write`) | `pre-tool-use.sh` | scope guard → `{"permission":"deny","agent_message":…}` |
+| `preToolUse` (matcher `Write`) | `pre-tool-use.sh` | scope guard → `{"permission":"deny","agent_message":…}`; set `sea_session` (see the pack table) |
 | `stop` (`loop_limit: 2`) | `stop.sh` | `decision: block` → `followup_message`; `loop_count > 0` → `stop_hook_active` |
 | `subagentStop` (`loop_limit: 2`) | `subagent-stop.sh` | see gaps |
 
@@ -391,11 +401,11 @@ files instead of guessing.
 | `CC_ANCHOR_STOP_WARN` | `1` | `0` disables the Stop-hook nudge |
 | `CC_ANCHOR_COLOR` | `1` | `0` disables ANSI colour in the status line |
 | `CC_ANCHOR_SEA` | auto | `1`/`0` forces sea-lite detection |
-| `CC_ANCHOR_CLAIM_GUARD`, `…_SESSION_DOC`, `…_SUBAGENT_RELEASE`, `…_TASK_MIRROR`, `…_TASK_MIRROR_GATE`, `…_SCOPE_GUARD`, `…_SCOPE_TTL`, `…_SCOPE_TIMEOUT` | see pack table | Environment form of the `cc-anchor.json` switches |
+| `CC_ANCHOR_CLAIM_GUARD`, `…_SESSION_DOC`, `…_SUBAGENT_RELEASE`, `…_TASK_MIRROR`, `…_TASK_MIRROR_GATE`, `…_SCOPE_GUARD`, `…_SCOPE_TTL`, `…_SCOPE_TIMEOUT`, `…_HEARTBEAT`, `…_HEARTBEAT_INTERVAL`, `…_SEA_SESSION`, `…_SEA_ACTOR` | see pack table | Environment form of the `cc-anchor.json` switches |
 | `CC_ANCHOR_KRONICLE_LITE_BIN`, `CC_ANCHOR_SEA_LITE_BIN` | auto | Path to the CLI (binary or `dist/cli.js`) |
 | `CC_ANCHOR_KRONICLE_DATA_DIR` | — | `--data-dir` for `kronicle-lite put` (defaults to the server's `~/.kronicle-lite`) |
-| `CC_ANCHOR_SEA_MODULE`, `CC_ANCHOR_SEA_DATA_DIR` | auto | sea-lite package path / data dir for the task mirror (`KRONICLE_LITE_DATA_DIR` is honoured too) |
-| `CC_ANCHOR_SYNC` | `0` | `1` runs the session-document put inline instead of in the background (tests) |
+| `CC_ANCHOR_SEA_MODULE`, `CC_ANCHOR_SEA_DATA_DIR` | auto | sea-lite package path / data dir for the task mirror, the scope guard and the heartbeat (`--data-dir`; `KRONICLE_LITE_DATA_DIR` is honoured too) |
+| `CC_ANCHOR_SYNC` | `0` | `1` runs the session-document put and the heartbeat inline instead of in the background (tests) |
 
 Set them in your shell before launching `claude`, or in `settings.json` `env`.
 

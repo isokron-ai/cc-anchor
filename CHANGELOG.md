@@ -4,6 +4,55 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [0.3.0] — unreleased
+
+Fixes from the adoption audit (B1, B2, B5 on the cc-anchor side). Needs
+sea-lite ≥ 0.4.0 for the scope guard and the heartbeat; with an older
+sea-lite both fail open and say so in the log.
+
+### Fixed
+- **The scope guard never denied anything (B2).** It passed an absolute
+  path the CLI rejected, read text output as JSON, expected field names the
+  CLI never emitted (`ticket/paths/expires`) and passed no identity — so
+  every real conflict failed open — and its tests used a fake sea-lite that
+  spoke the same wrong contract. It now speaks sea-lite 0.4.0's documented
+  contract: `scope-check --json --session <session_id> <absolute file>`,
+  `schema: "sea-lite.scope-check/1"`, `holder_label` / `ticket_id` /
+  `title` / `held` / `claim_expires_at`; `outside_repo` (exit 2) is allowed
+  quietly; a sea-lite without the JSON contract fails open with an explicit
+  "older than 0.4.0" log line. The deny reason names holder, ticket,
+  title, locked paths and expiry.
+- **Two sessions of one actor are told apart (B1).** The guard passes the
+  hook's `session_id`; sea-lite maps it to the identity the session's MCP
+  server claims under, so another Claude Code session running the same
+  `--actor` is denied and the session's own claims never are. Verdicts are
+  cached per **session and path** (one session's "ok" used to answer for
+  every session in the project).
+- **The `Stop` claim guard leaked other sessions' claims.** `claims.json`
+  is shared by every session of a project; the guard now considers only the
+  stopping session's claims, instead of blocking an unrelated session and
+  printing another session's claim tokens.
+
+### Added
+- **Lease heartbeat (B5)** (`heartbeat`, auto): PostToolUse renews the
+  session's sea-lite claims in the background, at most once per
+  `heartbeat_interval` s (60) per session, so a task longer than one lease
+  keeps its lock. Builtins only when not due.
+- Config `sea_session` (Cursor: name the session your sea-lite server runs
+  with) and `sea_actor`; `CC_ANCHOR_SEA_DATA_DIR` is passed to the guard and
+  the heartbeat as `--data-dir`.
+- **Contract tests against the real sea-lite CLI** (`tests/sea-contract.test.mjs`):
+  same-actor/other-session deny, holder allowed, absolute path + `--json` +
+  `--session` on the command line, outside-repo and other-repo allowed,
+  per-session cache, Cursor adapter, heartbeat. They find the CLI at
+  `$SEA_LITE_CLI`, `node_modules/sea-lite`, or a sibling `../sea-lite`
+  checkout and fail (not skip) when it is missing, unless
+  `CC_ANCHOR_SKIP_SEA_CONTRACT=1`. CI installs `sea-lite@^0.4.0`.
+
+### Changed
+- Docs: the scope guard does not see Bash-tool edits (`sed -i`,
+  redirects, formatters); sea-lite's git pre-commit guard is the backstop.
+
 ## [0.2.0] — 2026-11-01
 
 ### Added — lifecycle hooks pack (all opt-in; inert without kronicle-lite / sea-lite)

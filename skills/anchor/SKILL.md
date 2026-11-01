@@ -71,9 +71,13 @@ sea-lite; the switches default to off (`config` shows them).
   listed calls before taking new work; they disappear once released.
 - **Subagents**: if you are the subagent and the SubagentStop hook blocks
   you, release your claims with the listed calls and finish again.
-- **Scope guard denied an edit**: another actor holds a live claim whose
-  scope covers that path. Do not work around it (no Bash heredocs to the
-  file). Coordinate, wait for the lease shown, or claim the ticket.
+- **Scope guard denied an edit**: someone else — another actor, or another
+  Claude Code session (`claude#4f7a1e03` is a different session from yours
+  even with the same name) — holds a live claim whose scope covers that
+  path. Do not work around it: the guard does not see Bash, so `sed -i`,
+  heredocs or redirects to the file would bypass it and the pre-commit
+  guard will refuse the commit anyway. Take other work (`sea_next`), wait
+  for the expiry shown, or coordinate with the holder.
 - **TaskCompleted refused with "open predecessor(s)"**: the mirrored sea-lite
   ticket depends on unfinished work. Finish or unlink those first.
 - **Session documents**: with `session_doc` on, every Stop writes
