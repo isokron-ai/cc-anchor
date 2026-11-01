@@ -49,10 +49,14 @@ root="${CLAUDE_PROJECT_DIR:-}"
 if [[ -z "$root" && "$input" =~ \"cwd\":[[:space:]]*\"([^\"]*)\" ]]; then root="${BASH_REMATCH[1]}"; fi
 cc_resolve "${root:-$PWD}"
 
+# 0.5.0 Bash claimed-path guard: mark when this call began (one builtin
+# write; PostToolUse compares against it). Independent of kronicle-lite.
+cc_bg_prestamp "$input"
+
 sid=""
 [[ "$input" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
-cc_kl_session "$sid"
-[[ -e "$CC_KL_B.off" ]] && exit 0
+cc_kl_session "$sid" "$(cc_payload_agent "$input")"
+[[ -e "$CC_KL_S.off" ]] && exit 0
 case "$(cc_cfg_raw pulse)" in 0|false|no|off) exit 0;; esac
 cc_kl_enabled || exit 0
 

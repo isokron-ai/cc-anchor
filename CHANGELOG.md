@@ -6,6 +6,43 @@ SemVer.
 
 ## [Unreleased]
 
+### Next cycle (branch `next-cycle`; not part of the push-hook release)
+
+#### Added
+- **Per-subagent retraction cursors.** Subagent tool events carry
+  `agent_id`; the push and the pulse now key their cursor, seq, stamp and
+  pending files on it (`push/<sid8>.a-<agent>.*`; the main agent keeps
+  `push/<sid8>.*`). A new `SubagentStart` hook seeds each subagent's cursor
+  from the main agent's (a file copy, no kronicle-lite call), so a
+  retraction that lands while subagents run reaches each subagent and the
+  parent exactly once; before, whichever agent's tool call fired first
+  consumed it for everyone. A subagent seen without a `SubagentStart` seeds
+  lazily at its first tool call; `SubagentStop` drops its files unless the
+  stop is blocked. Contract-tested with the real CLI (parent + two
+  subagents, one retraction: 1/1/1).
+- **Bash claimed-path guard** (`bash_guard`, auto = when this project has
+  seen sea-lite claims or sea-lite is configured; `bash_guard_ttl` 30 s).
+  The Edit/Write scope guard never sees `sed -i`, redirects, formatters or
+  codegen run through Bash. Now the Bash `PreToolUse` stamps the call
+  (builtin write of its `tool_use_id`) and `PostToolUse` walks only the
+  paths other sessions hold — from a cached `sea-lite board --json`,
+  refreshed at most every `bash_guard_ttl` s and dropped on any `sea_*`
+  result — with builtin `-ot` tests against that stamp. A changed, new or
+  removed path is named at once with holder, ticket, title and expiry; one
+  `git status --porcelain --ignored=matching` over just those paths first
+  drops git-ignored output. Nothing changed in a claimed path: no process.
+  Fail-open; contract-tested with the real sea-lite CLI.
+
+#### Fixed
+- **Empty card at startup.** `InstructionsLoaded` renders the template card
+  ("Project: (unset …)", "Goal: (unset …)", "- (none …)") before
+  `SessionStart` runs, so every new session got that empty card injected.
+  `SessionStart` (startup/resume/clear/fork) now stays silent while the card
+  is still the untouched template; one real project, goal or invariant is
+  enough to inject it, and `compact` always injects.
+
+### push-hook release
+
 The one strong live-agent result from agent-memory-bench Track B, shipped:
 T1 (the runbook changes mid-session) went 0/36 for every pull setup and
 10/10 with a retraction push prototype. Needs kronicle-lite ≥ 0.5.0; inert

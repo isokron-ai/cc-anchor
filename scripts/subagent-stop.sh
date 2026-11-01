@@ -40,10 +40,15 @@ CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HE
 cc_have_jq || exit 0
 
 input="$(cat 2>/dev/null || true)"
-IFS=$'\x1f' read -r cwd active agent < <(jq -r '[(.cwd // ""), ((.stop_hook_active // false) | tostring), (.agent_id // "")] | map(gsub("[\\x1f\\n]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
+IFS=$'\x1f' read -r cwd active agent sid < <(jq -r '[(.cwd // ""), ((.stop_hook_active // false) | tostring), (.agent_id // ""), (.session_id // "")] | map(gsub("[\\x1f\\n]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
 [[ -n "${agent:-}" ]] || exit 0
 
 cc_resolve "${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
+# 0.5.0: the subagent's own retraction cursor goes when it stops — unless
+# this hook blocks the stop below (the subagent then keeps working).
+blocking=0
+cc_kl_session "${sid:-}" "$agent"
+trap '[[ "$blocking" == 1 ]] || cc_kl_forget' EXIT
 [[ -s "$CC_CLAIMS" ]] || exit 0
 
 if ! cc_on subagent_release 1; then exit 0; fi
@@ -63,6 +68,7 @@ latch="subagent_block_${agent//[^A-Za-z0-9_]/_}"
 cc_state_set "$latch" "$key"
 
 n="$(jq 'length' <<<"$live")"
+blocking=1
 cc_emit_block "release your sea-lite claim(s) before finishing — you still hold ${n}:
 $(cc_claims_lines "$live")
 Call sea_release (with a hand-off note) or sea_transition to a terminal state for each, then finish. (cc-anchor; fires once per claim set. The parent session will also see these as pending releases.)"

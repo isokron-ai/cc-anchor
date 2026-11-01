@@ -111,7 +111,8 @@ with `claude -p --autocompact 100k` and prints every hook event.
 | :- | :- | :- |
 | `PreCompact` | `manual\|auto` | Renders the card to disk, stamps `compacted_at`. Never blocks. |
 | `SessionStart` | `compact` | Injects the card verbatim under `ANCHOR — verbatim, read before anything else`, then the discipline, then (kronicle-lite only) `call get_system_state with since_cursor=<cursor> before material work`. |
-| `SessionStart` | `startup\|resume\|clear\|fork` | Injects the card if one exists, under a `session start` header. Silent otherwise. |
+| `SessionStart` | `startup\|resume\|clear\|fork` | Injects the card if one exists and is not the untouched template, under a `session start` header. Silent otherwise. |
+| `SubagentStart` | — | Seeds the subagent's own kronicle-lite retraction cursor from the parent's (kronicle-lite only; a file copy). |
 | `PostToolUse` | `*` | Appends `{ts, tool, target}` to a rolling trail and re-renders the card's last-5 section. One `jq` call, ~10–20 ms. Captures the cursor from any `mcp__*__get_system_state` result. With kronicle-lite: pushes new retractions as `additionalContext` (two builtin mtime tests when nothing changed). |
 | `UserPromptSubmit` | — | The bare word `anchor` re-injects the card. Everything else passes through — unless `InstructionsLoaded(compact)` found that the post-compaction injection did not run, in which case the card is re-asserted once with the next prompt. |
 | `Stop` | — | Rotates the trail; once per 30 min, a one-line nudge when the goal is > 45 min stale (`CC_ANCHOR_STOP_WARN=0` to disable). With the pack: claim guard, session document. |
@@ -281,10 +282,14 @@ kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 | `pulse_chain` | `split` | `check`: allow chained calls. |
 | `kronicle_data_dir` | auto | Store to read (see above). |
 
+**Subagents** have their own cursors: subagent tool events carry
+`agent_id`, a `SubagentStart` hook seeds the subagent's cursor from the main
+agent's (a file copy), and each agent — parent and every subagent — is told
+about a retraction exactly once, at its own next tool call. The pulse's
+"delivered, not acted on yet" state is per agent too.
+
 Not covered: Bash calls the regex does not name; a change that lands
-*during* a single world-changing command; subagents of the same session
-share its cursor, so a retraction delivered to one is not repeated to the
-others. Cursor has no post-tool context output, so the push is Claude
+*during* a single world-changing command. Cursor has no post-tool context output, so the push is Claude
 Code-only for now.
 
 ## Lifecycle hooks pack
@@ -304,6 +309,7 @@ bash pattern matching, so an unset switch costs no `jq` call.
 | `task_mirror_gate` | on | `TaskCompleted` | With `task_mirror`: exit 2 (completion refused, reason fed back to Claude) while the ticket `depends_on` a non-terminal ticket or a non-terminal ticket `blocks` it. |
 | `scope_guard` | off | `PreToolUse` | Deny `Edit`/`Write`/`MultiEdit`/`NotebookEdit` inside someone else's live sea-lite claim — another actor, **or the same actor in another Claude Code session**. Needs sea-lite ≥ 0.4.0: runs `sea-lite scope-check --json --session <session_id> <absolute file>` and turns exit 1 + `{schema:"sea-lite.scope-check/1", conflicts:[{holder_label, ticket_id, title, held, claim_expires_at}]}` into `permissionDecision: "deny"` naming holder, ticket, title, locked paths and expiry. sea-lite maps the hook's `session_id` to the identity this session's MCP server claims under, so the session's own claims (main agent and subagents) never block it. A file outside any repository (`outside_repo`) or in another repository is allowed. Verdicts are cached per **session and path** for `scope_ttl` s (30); the cache is dropped whenever a `sea_*` result passes through PostToolUse. Cached: ~20 ms; cold: one `sea-lite` spawn bounded by `scope_timeout` s (4). A missing binary, a sea-lite older than 0.4.0, a crash or a timeout **fail open** and are logged once. **Bash-tool edits** (`sed -i`, redirects, formatters) never reach this hook; install sea-lite's git guard (`sea-lite precommit --install`) as the backstop. |
 | `heartbeat` | auto | `PostToolUse` | Keep this session's sea-lite leases alive while it works: at most once per `heartbeat_interval` s (60) per session, `sea-lite heartbeat --session <session_id>` runs in the background and renews every live claim of the session by its own lease (a lapsed one is never revived). Auto = on once this project has seen a claim or sea-lite is configured — no setup needed (agent-memory-bench Track A S13: without it a lease lapsed mid-task 3/3; with it 3/3 survived). When not due it costs one builtin file read. |
+| `bash_guard` | auto | `PreToolUse` / `PostToolUse` (Bash) | After a Bash call, name every path inside a live sea-lite claim held by **another session** that the call changed, created or removed — holder, ticket, title, expiry — as context next to the tool result. Covers what the Edit/Write scope guard cannot see (`sed -i`, redirects, formatters, codegen). The `PreToolUse` stamps the call; `PostToolUse` walks only the claimed paths (from a cached `sea-lite board --json`, refreshed at most every `bash_guard_ttl` s (30) and dropped on any `sea_*` result) with builtin mtime tests, so nothing changed there = no process; a hit costs one `git status` to drop git-ignored files. Advisory: the change already happened. Auto = on once this project has seen a claim or sea-lite is configured. With 1-second mtimes (macOS stock bash 3.2) a file changed in the same second just *before* the call can be reported too. |
 | `sea_session` | — | `PreToolUse` / `PostToolUse` | Act as this sea-lite session instead of the hook's `session_id`. Claude Code needs nothing here. **Cursor**: Cursor's conversation id is not the MCP server's session, so start the server with a fixed one (`serve --session cursor-main`) and set `CC_ANCHOR_SEA_SESSION=cursor-main`; otherwise the guard cannot tell the agent's own claims from others' and denies them. |
 | `sea_actor` | — | `PreToolUse` / `PostToolUse` | Pass `--actor` too: then only that actor's claims in the session count as the hook's own (default: every claim of the session). |
 
@@ -424,8 +430,9 @@ reference asks. `cwd` follows Claude into the worktree while
 ### Runtime files
 
 `.claude/cc-anchor/` gains `claims.json`, `pending-release.jsonl`,
-`scope-cache.json`, `tasks.json` (task id → ticket id), `push/` (per-session
-kronicle-lite cursor, head seq, mtime stamp, pending retractions), `log` and
+`scope-cache.json`, `tasks.json` (task id → ticket id), `push/` (per-agent
+kronicle-lite cursor, head seq, mtime stamp, pending retractions),
+`bashguard/` (claimed-path cache, per-session Bash stamps), `log` and
 `once/` (rate-limit latches). All regenerable; keep the directory in `.gitignore`.
 
 ## Cursor
@@ -505,7 +512,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 106 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 116 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

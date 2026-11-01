@@ -53,8 +53,10 @@ cc_resolve "${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
 cc_kl_session "$sid"
 if [[ ! -s "$CC_KL_B.cursor" ]] && cc_kl_enabled; then cc_kl_init || true; fi
 
-if [[ "$source_kind" != "compact" && ! -s "$CC_CARD" ]]; then
-  # Nothing to anchor on yet; stay silent rather than nag on every startup.
+if [[ "$source_kind" != "compact" ]] && cc_card_blank; then
+  # Nothing to anchor on yet (no card, or only the template InstructionsLoaded
+  # rendered: "Project: (unset …)"); stay silent rather than inject an empty
+  # card on every startup.
   exit 0
 fi
 

@@ -278,6 +278,23 @@ test('SessionStart(resume, docs payload) injects the card with a session-start h
   } finally { sb.cleanup(); }
 });
 
+test('SessionStart(startup) stays silent when InstructionsLoaded only rendered the empty template card ("Project: (unset)")', () => {
+  const sb = sandbox();
+  try {
+    hook('instructions-loaded.sh', fixture('instructionsloaded-session-start.json', { cwd: sb.proj, file_path: `${sb.proj}/CLAUDE.md` }), sb.env);
+    assert.match(sb.readCard(), /^Project: \(unset/m, 'the template card exists on disk');
+    for (const src of ['startup', 'resume', 'clear']) {
+      const r = hook('session-start.sh', fixture('sessionstart-resume.json', { cwd: sb.proj, source: src }), sb.env);
+      assert.equal(r.stdout, '', `${src}: no empty card injected`);
+    }
+    cli(['add-invariant', 'never push to main'], sb.env);
+    const r = hook('session-start.sh', fixture('sessionstart-resume.json', { cwd: sb.proj, source: 'startup' }), sb.env);
+    assert.match(r.json?.hookSpecificOutput?.additionalContext || '', /never push to main/, 'one real entry is enough to inject');
+    const c = hook('session-start.sh', fixture('sessionstart-compact.json', { cwd: sb.proj }), sb.env);
+    assert.match(c.json?.hookSpecificOutput?.additionalContext || '', /^ANCHOR — verbatim/, 'compact always injects');
+  } finally { sb.cleanup(); }
+});
+
 test('SessionStart(compact) with no card at all explains how to create one', () => {
   const sb = sandbox();
   try {
@@ -403,7 +420,7 @@ test('statusline install: refuses to overwrite a foreign statusLine (exit 3), --
 
 test('hooks.json references only scripts that exist, in exec form, with timeouts', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
-  assert.deepEqual(Object.keys(hooks).sort(), ['InstructionsLoaded', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStop', 'TaskCompleted', 'TaskCreated', 'UserPromptSubmit']);
+  assert.deepEqual(Object.keys(hooks).sort(), ['InstructionsLoaded', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'TaskCompleted', 'TaskCreated', 'UserPromptSubmit']);
   for (const [ev, groups] of Object.entries(hooks)) {
     for (const g of groups) for (const h of g.hooks) {
       assert.equal(h.type, 'command', ev);

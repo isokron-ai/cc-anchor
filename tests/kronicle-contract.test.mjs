@@ -48,13 +48,15 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
     Object.assign(base, { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_DATA_DIR: data });
   }
   const start = (s = sid, source = 'startup') => hook('session-start.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SessionStart', source }, sb.env, base);
-  const post = (command = 'make', s = sid, extra = {}) => hook('post-tool-use.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command }, tool_response: {} }, sb.env, { ...base, ...extra });
-  const pre = (command, s = sid, extra = {}) => hook('pulse.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } }, sb.env, { ...base, ...extra });
+  const post = (command = 'make', s = sid, extra = {}, agent = null) => hook('post-tool-use.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PostToolUse', ...(agent ? { agent_id: agent, agent_type: 'general-purpose' } : {}), tool_name: 'Bash', tool_input: { command }, tool_response: {} }, sb.env, { ...base, ...extra });
+  const spawn = (agent, s = sid) => hook('subagent-start.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SubagentStart', agent_id: agent, agent_type: 'general-purpose' }, sb.env, base);
+  const stopAgent = (agent, s = sid) => hook('subagent-stop.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SubagentStop', stop_hook_active: false, agent_id: agent, agent_type: 'general-purpose', last_assistant_message: 'done' }, sb.env, base);
+  const pre = (command, s = sid, extra = {}, agent = null) => hook('pulse.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PreToolUse', ...(agent ? { agent_id: agent, agent_type: 'general-purpose' } : {}), tool_name: 'Bash', tool_input: { command } }, sb.env, { ...base, ...extra });
   const ctx = (r) => r.json?.hookSpecificOutput?.additionalContext ?? null;
   const decision = (r) => r.json?.hookSpecificOutput?.permissionDecision ?? null;
   const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason ?? '';
   const log = () => (fs.existsSync(path.join(sb.run, 'log')) ? fs.readFileSync(path.join(sb.run, 'log'), 'utf8') : '');
-  return { sb, data, put, start, post, pre, ctx, decision, reason, log };
+  return { sb, data, put, start, post, pre, spawn, stopAgent, ctx, decision, reason, log };
 }
 
 test('push (real CLI): a retraction that lands during a tool call is injected after it — relied on / now / diff — exactly once', opts, () => {
@@ -204,5 +206,52 @@ test('push (real CLI): a cursor survives compaction and resume (SessionStart doe
     w.put(RB('staging-r'));
     w.start(undefined, 'compact');
     assert.match(w.ctx(w.post('after-compact')) || '', /staging-r/, 'the change made before the compaction is still delivered');
+  } finally { w.sb.cleanup(); }
+});
+
+// ── 0.5.0: per-subagent cursors ──────────────────────────────────────────
+test('per-subagent cursors (real CLI): one retraction, parent + two subagents → each gets it exactly once', opts, () => {
+  const w = world();
+  try {
+    w.start();
+    w.post('./bin/preflight');
+    assert.equal(w.spawn('agent-a1').stdout, '', 'SubagentStart is silent');
+    assert.equal(w.spawn('agent-b2').stdout, '');
+    w.put(RB('staging-b'));
+    const got = { parent: 0, a: 0, b: 0 };
+    const count = (r, k) => { if (/staging-b/.test(w.ctx(r) || '')) got[k]++; };
+    // Interleaved, several tool calls each: A consumes first, then B, then the parent.
+    for (let i = 0; i < 3; i++) count(w.post(`a${i}`, undefined, {}, 'agent-a1'), 'a');
+    for (let i = 0; i < 3; i++) count(w.post(`b${i}`, undefined, {}, 'agent-b2'), 'b');
+    for (let i = 0; i < 3; i++) count(w.post(`p${i}`), 'parent');
+    assert.deepEqual(got, { parent: 1, a: 1, b: 1 });
+  } finally { w.sb.cleanup(); }
+});
+
+test('per-subagent cursors (real CLI): a change the parent has not consumed yet reaches a subagent spawned after it; a stopped subagent’s cursor is dropped', opts, () => {
+  const w = world();
+  try {
+    w.start();
+    w.put(RB('staging-c')); // lands before the spawn; the parent has not seen it
+    w.spawn('agent-c3');
+    assert.match(w.ctx(w.post('c', undefined, {}, 'agent-c3')) || '', /staging-c/);
+    assert.match(w.ctx(w.post('p')) || '', /staging-c/, 'the parent still gets it');
+    const f = path.join(w.sb.run, 'push', 'sesskl00.a-agentc3.cursor');
+    assert.ok(fs.existsSync(f));
+    w.stopAgent('agent-c3');
+    assert.ok(!fs.existsSync(f), 'SubagentStop drops the subagent cursor');
+  } finally { w.sb.cleanup(); }
+});
+
+test('per-subagent cursors (real CLI): without a SubagentStart the subagent seeds from the parent lazily; the pulse is per agent', opts, () => {
+  const w = world();
+  try {
+    w.start();
+    w.post('p0');
+    w.put(RB('staging-d'));
+    assert.match(w.ctx(w.post('x', undefined, {}, 'agent-d4')) || '', /staging-d/, 'no SubagentStart: seeded from the parent at the first tool call');
+    const d = w.pre('./bin/deploy --target staging-a', undefined, {}, 'agent-d4');
+    assert.equal(w.decision(d), 'deny', 'pending is per agent: d4 went straight to deploy');
+    assert.equal(w.decision(w.pre('./bin/deploy --target staging-a')), 'deny', 'the parent has not seen it either: its own pulse denies');
   } finally { w.sb.cleanup(); }
 });

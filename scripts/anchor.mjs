@@ -122,6 +122,8 @@ export const CONFIG_KEYS = {
   pulse_match: { default: 'deploy|migrate|publish|release|git push|terraform apply|kubectl apply', hook: 'PreToolUse (Bash)', doc: 'regex for world-changing commands (word boundaries added; quoted text ignored)' },
   pulse_mode: { default: 'deny', hook: 'PreToolUse (Bash)', doc: 'deny | warn when an unreconciled semantic retraction exists' },
   pulse_chain: { default: 'split', hook: 'PreToolUse (Bash)', doc: 'split = deny a call that runs a world-changing step after other steps (run it on its own); check = allow' },
+  bash_guard: { default: 'auto', hook: 'PreToolUse/PostToolUse (Bash)', doc: 'after a Bash call, warn about changed paths inside live sea-lite claims of OTHER sessions (auto = when claims were seen or sea-lite is configured)' },
+  bash_guard_ttl: { default: 30, hook: 'PostToolUse (Bash)', doc: 'seconds the claimed-path list (sea-lite board) is cached; dropped on any sea_* result' },
   kronicle_data_dir: { default: '', hook: 'PostToolUse/PreToolUse', doc: 'kronicle-lite store the push reads (default: the kronicle MCP server\'s --data-dir, else $KRONICLE_LITE_DATA_DIR, else ~/.kronicle-lite)' },
 };
 

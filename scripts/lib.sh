@@ -138,6 +138,23 @@ cc_card_goal() {
   done < <(cc_card_top)
 }
 
+# 0 when the card is missing or still the untouched template: no project, no
+# goal, no invariant set (render.jq writes "(unset — …)" / "(none — …)"
+# placeholders). InstructionsLoaded renders a card before SessionStart runs,
+# so "the file exists" is not "someone anchored something".
+cc_card_blank() {
+  [[ -s "$CC_CARD" ]] || return 0
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "# ANCHOR"*|"<!-- cc-anchor"*|"Invariants:"*|"") ;;
+      "Project: (unset"*|"Goal: (unset"*|"- (none"*) ;;
+      *) return 1;;
+    esac
+  done < <(cc_card_top)
+  return 0
+}
+
 cc_valid_cursor() { [[ "$1" =~ $CC_CURSOR_RE ]]; }
 
 # Echo the first valid cursor found, searching (in order):
@@ -431,7 +448,7 @@ cc_claims_update() {
   out="$(jq -c -f "$CC_LIB_DIR/claims.jq" --slurpfile claims "$cur" --arg now "$now" --arg terminal_re "$CC_TERMINAL_RE" <<<"$payload" 2>/dev/null)" || return 0
   [[ -n "$out" ]] || return 0
   printf '%s\n' "$out" > "$CC_CLAIMS.tmp.$$" && mv -f "$CC_CLAIMS.tmp.$$" "$CC_CLAIMS"
-  rm -f "$CC_SCOPE_CACHE" 2>/dev/null || true
+  rm -f "$CC_SCOPE_CACHE" "$CC_RUN/bashguard/claims.at" 2>/dev/null || true
 }
 
 # cc_claims_live [agent_id|*] [session_id|*] — compact JSON array of live
@@ -579,7 +596,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_SID=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -589,11 +606,46 @@ cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
   printf -v "$1" '%s' "$__t"
 }
 
-# cc_kl_session <session_id> — per-session file prefix (builtins only).
+# cc_kl_session <session_id> [agent_id] — file prefixes (builtins only).
+#   CC_KL_S  per session: cfg / off / fail (the CLI and its health are shared)
+#   CC_KL_B  per AGENT:   cursor / seq / stamp / pending. The main agent is
+#            "<sid8>", a subagent "<sid8>.a-<agent16>". Each subagent has its
+#            own cursor, seeded from the main agent's at SubagentStart, so a
+#            retraction one agent consumed still reaches its siblings and the
+#            parent (each exactly once).
 cc_kl_session() {
-  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  local s="${1:-nosession}" a="${2:-}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
   CC_KL_SID="${s:-nosession}"
-  CC_KL_B="$CC_RUN/push/$CC_KL_SID"
+  CC_KL_S="$CC_RUN/push/$CC_KL_SID"
+  a="${a//[^A-Za-z0-9]/}"; CC_KL_AGENT="${a:0:16}"
+  if [[ -n "$CC_KL_AGENT" ]]; then CC_KL_B="$CC_KL_S.a-$CC_KL_AGENT"; else CC_KL_B="$CC_KL_S"; fi
+}
+
+# cc_payload_agent <payload> — the hook's agent_id ("" in the main agent).
+# jq only when the payload mentions agent_id at all (subagents), and read
+# from the top level: a tool_input may carry its own "agent_id".
+cc_payload_agent() {
+  [[ "$1" == *'"agent_id"'* ]] || return 0
+  jq -r '.agent_id // "" | tostring' <<<"$1" 2>/dev/null || true
+}
+
+# cc_kl_seed — start a subagent's cursor where its parent's is (copy), so
+# everything the parent has not consumed yet reaches the subagent too.
+# Falls back to the head when the parent has no cursor. Main agent: init.
+cc_kl_seed() {
+  if [[ -n "$CC_KL_AGENT" && -s "$CC_KL_S.cursor" ]]; then
+    cp -f "$CC_KL_S.cursor" "$CC_KL_B.cursor.$$" 2>/dev/null && mv -f "$CC_KL_B.cursor.$$" "$CC_KL_B.cursor" || return 1
+    if [[ -s "$CC_KL_S.seq" ]]; then cp -f "$CC_KL_S.seq" "$CC_KL_B.seq" 2>/dev/null || true; fi
+    rm -f "$CC_KL_B.stamp" 2>/dev/null
+    return 0
+  fi
+  cc_kl_init
+}
+
+# cc_kl_forget — drop a stopped subagent's cursor files.
+cc_kl_forget() {
+  [[ -n "$CC_KL_AGENT" ]] || return 0
+  rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" 2>/dev/null || true
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
@@ -624,22 +676,22 @@ cc_kl_enabled() {
   [[ "${CC_ANCHOR_KRONICLE:-}" == 0 ]] && return 1
   local sw; sw="$(cc_cfg_raw push)"
   case "$sw" in 0|false|no|off) return 1;; esac
-  if [[ -s "$CC_KL_B.cfg" ]]; then
-    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; } < "$CC_KL_B.cfg"
+  if [[ -s "$CC_KL_S.cfg" ]]; then
+    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; } < "$CC_KL_S.cfg"
     [[ -n "$CC_KL_BIN" ]] && return 0
   fi
-  [[ -e "$CC_KL_B.off" ]] && return 1
+  [[ -e "$CC_KL_S.off" ]] && return 1
   mkdir -p "$CC_RUN/push" 2>/dev/null || return 1
   case "$sw" in
     1|true|yes|on) ;;
-    *) cc_kronicle_configured || { : > "$CC_KL_B.off"; return 1; };;
+    *) cc_kronicle_configured || { : > "$CC_KL_S.off"; return 1; };;
   esac
   CC_KL_BIN="$(cc_find_cli kronicle-lite)" || {
-    : > "$CC_KL_B.off"
+    : > "$CC_KL_S.off"
     cc_log_once kl_nobin "push: kronicle-lite is configured but its CLI was not found (PATH, plugin cache, CC_ANCHOR_KRONICLE_LITE_BIN); retraction push/pulse off"
     return 1; }
   CC_KL_DD="$(cc_kl_data_dir)"
-  printf '%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" > "$CC_KL_B.cfg" 2>/dev/null || return 1
+  printf '%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" > "$CC_KL_S.cfg" 2>/dev/null || return 1
   return 0
 }
 
@@ -655,15 +707,15 @@ cc_kl_orient() {
 
 cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
   local now; cc_epoch_now_var now
-  printf '%s\n' "$now" > "$CC_KL_B.fail" 2>/dev/null || true
+  printf '%s\n' "$now" > "$CC_KL_S.fail" 2>/dev/null || true
   CC_KL_FAILED=1
   if [[ "$1" == 124 ]]; then cc_log_once kl_timeout "push: kronicle-lite orient timed out (push_timeout); failing open"
   else cc_log_once kl_err "push: kronicle-lite orient failed (exit $1); failing open"; fi
 }
 
 cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
-  [[ -s "$CC_KL_B.fail" ]] || return 1
-  local t now; IFS= read -r t < "$CC_KL_B.fail" || t=0
+  [[ -s "$CC_KL_S.fail" ]] || return 1
+  local t now; IFS= read -r t < "$CC_KL_S.fail" || t=0
   cc_epoch_now_var now
   [[ "$t" =~ ^[0-9]+$ ]] && (( now - t < 60 )) && CC_KL_FAILED=1
 }
@@ -678,7 +730,7 @@ cc_kl_init() {
   IFS=$'\x1f' read -r cur seq < <(jq -r '[(.cursor // ""), ((.head.seq // "") | tostring)] | join("\u001f")' <<<"$out" 2>/dev/null)
   if [[ -z "$cur" ]]; then rm -f "$pre"; cc_kl_fail 2; return 1; fi
   printf '%s\n' "$cur" > "$CC_KL_B.cursor" && printf '%s\n' "$seq" > "$CC_KL_B.seq" && mv -f "$pre" "$CC_KL_B.stamp"
-  rm -f "$pre" "$CC_KL_B.fail" 2>/dev/null
+  rm -f "$pre" "$CC_KL_S.fail" 2>/dev/null
   return 0
 }
 
@@ -697,7 +749,13 @@ cc_kl_unchanged() {
 # Sets KL_BODY ("- …" lines), KL_SHOWN, KL_BLOCK, KL_COS, KL_SEQ.
 cc_kl_fetch() {
   KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
-  if [[ ! -s "$CC_KL_B.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
+  if [[ ! -s "$CC_KL_B.cursor" ]]; then
+    # Main agent without a cursor: start at the head (nothing is "new" yet).
+    # Subagent without one (no SubagentStart seen): seed from the parent and
+    # go on to fetch, so what the parent has not consumed reaches it too.
+    if [[ -z "$CC_KL_AGENT" || ! -s "$CC_KL_S.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
+    cc_kl_seed || { CC_KL_FAILED=1; return 1; }
+  fi
   cc_kl_unchanged && return 1
   cc_kl_backoff && return 1
   local pre="$CC_KL_B.stamp.$$" out rc seq stored="" cur=""
@@ -727,7 +785,7 @@ cc_kl_fetch() {
     printf '%s\n' "$KL_SEQ" > "$CC_KL_B.seq"
   fi
   mv -f "$pre" "$CC_KL_B.stamp"
-  rm -f "$CC_KL_B.fail" 2>/dev/null
+  rm -f "$CC_KL_S.fail" 2>/dev/null
   return 0
 }
 
@@ -737,8 +795,8 @@ cc_kl_push() {
   local payload="$1" sid=""
   CC_KL_CONTEXT=""
   [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
-  cc_kl_session "$sid"
-  [[ -e "$CC_KL_B.off" ]] && return 0
+  cc_kl_session "$sid" "$(cc_payload_agent "$payload")"
+  [[ -e "$CC_KL_S.off" ]] && return 0
   cc_kl_enabled || return 0
   # The agent got a tool call in since the last push: what it was told is no
   # longer "unacted on".
@@ -751,5 +809,184 @@ Re-read the affected document (recall, or get_system_state with your cursor) and
   if (( KL_COS > 0 )) && ! cc_on push_cosmetic 0; then CC_KL_CONTEXT="${CC_KL_CONTEXT} (${KL_COS} cosmetic edit(s) not shown.)"; fi
   (( KL_BLOCK > 0 )) && printf '%s\n' "$KL_BODY" > "$CC_KL_B.pending"
   cc_log "push: ${KL_SHOWN} retraction(s) (${KL_BLOCK} blocking, ${KL_COS} cosmetic) at seq ${KL_SEQ}"
+  return 0
+}
+
+# ═══════════════════ 0.5.0: Bash claimed-path guard (sea-lite) ═══════════════════
+#
+# The Edit/Write scope guard never sees `sed -i`, redirects, formatters or
+# codegen run through Bash, and sea-lite's pre-commit guard only fires at
+# commit time. So after every Bash call: did it change a path inside a live
+# sea-lite claim held by ANOTHER session? If so, say so right away
+# (PostToolUse additionalContext) naming the path, the holder, the ticket and
+# the expiry. Advisory: the change already happened; the agent undoes it or
+# coordinates.
+#
+#   PreToolUse(Bash)  (pulse.sh) writes the call's tool_use_id to
+#                     <run>/bashguard/<sid8>.pre — its mtime is "the call began".
+#   PostToolUse(Bash) same tool_use_id => walk only the paths other sessions
+#                     hold (from a cached `sea-lite board --json`, refreshed at
+#                     most every bash_guard_ttl s, dropped whenever a sea_*
+#                     result passes) with builtin `-ot` tests against that
+#                     stamp. Nothing changed there => no process at all.
+#                     Something did => one `git status --porcelain` over those
+#                     paths drops ignored files (build output) before warning.
+#
+# Switch `bash_guard`: on | off | auto (default: on when this project has seen
+# sea-lite claims or sea-lite is configured), resolved once per session.
+# Fail-open: no CLI / timeout / bad output => no warning, one log line.
+
+CC_BG_CONTEXT=""
+
+cc_bg_session() {  # <session_id> — CC_BG_B (per-session prefix), CC_BG_D (dir)
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  CC_BG_D="$CC_RUN/bashguard"; CC_BG_B="$CC_BG_D/${s:-nosession}"
+}
+
+cc_bg_enabled() {
+  [[ -e "$CC_BG_B.on" ]] && return 0
+  [[ -e "$CC_BG_B.off" ]] && return 1
+  mkdir -p "$CC_BG_D" 2>/dev/null || return 1
+  case "$(cc_cfg_raw bash_guard)" in
+    0|false|no|off) : > "$CC_BG_B.off"; return 1;;
+    1|true|yes|on) ;;
+    *) if [[ ! -s "$CC_CLAIMS" ]] && ! cc_sea_configured; then : > "$CC_BG_B.off"; return 1; fi;;
+  esac
+  if ! cc_find_cli sea-lite >/dev/null; then
+    : > "$CC_BG_B.off"
+    cc_log_once bg_nobin "bash_guard: sea-lite CLI not found; Bash-changed paths are not checked against claims"
+    return 1
+  fi
+  : > "$CC_BG_B.on"
+}
+
+# PreToolUse(Bash): stamp the start of the call (one builtin write).
+cc_bg_prestamp() {  # <payload>
+  local payload="$1" sid="" tid=""
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  cc_bg_session "$sid"
+  [[ -e "$CC_BG_B.off" ]] && return 0
+  [[ "$payload" =~ \"tool_use_id\":[[:space:]]*\"([^\"]*)\" ]] && tid="${BASH_REMATCH[1]}"
+  [[ -n "$tid" ]] || return 0
+  [[ -d "$CC_BG_D" ]] || mkdir -p "$CC_BG_D" 2>/dev/null || return 0
+  printf '%s' "$tid" > "$CC_BG_B.pre" 2>/dev/null || true
+}
+
+# Refresh <dir>/claims.tsv from `sea-lite board --json`: one line per live
+# claimed scope: session \x1f absolute path \x1f holder \x1f ticket \x1f title \x1f expires
+cc_bg_refresh() {
+  local now; cc_epoch_now_var now
+  printf '%s\n' "$now" > "$CC_BG_D/claims.at" 2>/dev/null || return 1
+  local bin to out rc
+  bin="$(cc_find_cli sea-lite)" || { : > "$CC_BG_D/claims.tsv"; return 1; }
+  to="$(cc_cfg_raw scope_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=4
+  local -a args=(board --json)
+  [[ -n "${CC_ANCHOR_SEA_DATA_DIR:-}" ]] && args+=(--data-dir "$CC_ANCHOR_SEA_DATA_DIR")
+  if [[ "$bin" == *.js || "$bin" == *.mjs ]]; then out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" node "$bin" "${args[@]}" 2>/dev/null)"; rc=$?
+  else out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" "$bin" "${args[@]}" 2>/dev/null)"; rc=$?; fi
+  if (( rc != 0 )) || [[ -z "$out" ]]; then
+    : > "$CC_BG_D/claims.tsv"
+    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); not checking for ${CC_ANCHOR_BASH_GUARD_TTL:-30}s"
+    return 1
+  fi
+  jq -r '.tickets[]? | select(.claim != null) | . as $t | .claim as $c
+    | ($t.project // "") as $p
+    | ($c.scope // [])[]
+    | sub("[*?\\[].*$"; "") | sub("/+$"; "")
+    | [($c.session // ""), (if startswith("/") then . elif . == "" then $p else $p + "/" + . end),
+       ($c.holder_label // $c.holder // "?"), ($t.id // "" | .[0:8]), ($t.title // "" | gsub("[\\x1f\\n]"; " ") | .[0:80]), ($c.expires_at // "")]
+    | join("\u001f")' <<<"$out" > "$CC_BG_D/claims.tsv.$$" 2>/dev/null && mv -f "$CC_BG_D/claims.tsv.$$" "$CC_BG_D/claims.tsv"
+}
+
+# Walk one path, appending every entry not older than the stamp to CC_BG_HITS
+# (dirs whose entries changed but hold no newer file: "<dir>/ (entries removed
+# or renamed)"). Builtins only; at most CC_BG_BUDGET entries.
+CC_BG_HITS=(); CC_BG_BUDGET=0
+cc_bg_walk() {
+  local p="$1" stamp="$2" e n0
+  (( CC_BG_BUDGET-- > 0 )) || return 0
+  if [[ -d "$p" && ! -L "$p" ]]; then
+    n0=${#CC_BG_HITS[@]}
+    for e in "$p"/* "$p"/.[!.]*; do
+      [[ -e "$e" || -L "$e" ]] || continue
+      case "${e##*/}" in .git|node_modules) continue;; esac
+      cc_bg_walk "$e" "$stamp"
+    done
+    if (( ${#CC_BG_HITS[@]} == n0 )) && ! [[ "$p" -ot "$stamp" ]]; then CC_BG_HITS+=("$p/ (entries removed or renamed)"); fi
+  elif [[ -e "$p" || -L "$p" ]]; then
+    [[ "$p" -ot "$stamp" ]] || CC_BG_HITS+=("$p")
+  else
+    # The claimed path itself is gone: removed during the call if its parent changed.
+    [[ -d "${p%/*}" && ! "${p%/*}" -ot "$stamp" ]] && CC_BG_HITS+=("$p (removed)")
+  fi
+}
+
+# PostToolUse(Bash): sets CC_BG_CONTEXT (empty: say nothing).
+cc_bg_check() {
+  local payload="$1" sid="" tid="" pre
+  CC_BG_CONTEXT=""
+  [[ "$payload" =~ \"tool_name\":[[:space:]]*\"Bash\" ]] || return 0
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  cc_bg_session "$sid"
+  [[ -e "$CC_BG_B.off" ]] && return 0
+  cc_bg_enabled || return 0
+  pre="$CC_BG_B.pre"
+  [[ -s "$pre" ]] || return 0
+  [[ "$payload" =~ \"tool_use_id\":[[:space:]]*\"([^\"]*)\" ]] && tid="${BASH_REMATCH[1]}"
+  local stamped=""; IFS= read -r stamped < "$pre" || true
+  [[ -n "$tid" && "$stamped" == "$tid" ]] || return 0
+  # Claims cache: refresh when older than bash_guard_ttl s (or dropped).
+  local ttl at=0 now; ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
+  cc_epoch_now_var now
+  [[ -s "$CC_BG_D/claims.at" ]] && IFS= read -r at < "$CC_BG_D/claims.at"
+  [[ "$at" =~ ^[0-9]+$ ]] || at=0
+  if (( now - at >= ttl )) || [[ ! -e "$CC_BG_D/claims.tsv" ]]; then cc_bg_refresh || true; fi
+  [[ -s "$CC_BG_D/claims.tsv" ]] || return 0
+  local me ov; me="$sid"; ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && me="$ov"
+  local iso; cc_now_var iso
+  local ses path holder ticket title exp
+  local -a lines=()
+  CC_BG_BUDGET=4000
+  while IFS=$'\x1f' read -r ses path holder ticket title exp; do
+    [[ -n "$path" && "$ses" != "$me" ]] || continue
+    [[ -z "$exp" || "$exp" > "$iso" ]] || continue
+    CC_BG_HITS=()
+    cc_bg_walk "$path" "$pre"
+    local h
+    for h in ${CC_BG_HITS[@]+"${CC_BG_HITS[@]}"}; do
+      lines+=("${h}"$'\x1f'"${holder}"$'\x1f'"${ticket}"$'\x1f'"${title}"$'\x1f'"${path}"$'\x1f'"${exp}")
+    done
+  done < "$CC_BG_D/claims.tsv"
+  (( ${#lines[@]} > 0 )) || return 0
+  # Something changed inside another session's claim: drop git-ignored files
+  # (build output) with one bounded `git status` over those paths.
+  local ignored=""
+  if command -v git >/dev/null 2>&1; then
+    local -a gp=() l
+    for l in "${lines[@]}"; do l="${l%%$'\x1f'*}"; l="${l% (entries removed or renamed)}"; l="${l% (removed)}"; gp+=("${l%/}"); done
+    ignored="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout 3 git status --porcelain --ignored=matching -- "${gp[@]}" 2>/dev/null | while IFS= read -r l; do [[ "$l" == '!! '* ]] && printf '%s\n' "${l#!! }"; done)"
+  fi
+  local out="" n=0 shown=0 rel l2
+  for l in "${lines[@]}"; do
+    IFS=$'\x1f' read -r h holder ticket title path exp <<<"$l"
+    rel="${h#"$CC_ROOT"/}"
+    if [[ -n "$ignored" ]]; then
+      local skip=0 ig
+      while IFS= read -r ig; do [[ -n "$ig" && ( "$rel" == "${ig%/}" || "$rel" == "${ig%/}"/* ) ]] && { skip=1; break; }; done <<<"$ignored"
+      (( skip )) && continue
+    fi
+    n=$((n + 1))
+    (( shown < 10 )) || continue
+    shown=$((shown + 1))
+    l2="${path#"$CC_ROOT"/}"
+    out="${out}
+- ${rel} — held by ${holder}, ticket ${ticket} \"${title}\" (locks ${l2}; expires ${exp:-?})"
+  done
+  (( n > 0 )) || return 0
+  (( n > shown )) && out="${out}
+- … and $((n - shown)) more"
+  CC_BG_CONTEXT="cc-anchor bash guard: that Bash call changed ${n} path(s) inside live sea-lite claims held by OTHER sessions:${out}
+Those paths are another agent's work in progress. Undo your change (git checkout -- <path>, or delete the new file) unless you agreed it with the holder; the Edit/Write scope guard does not see Bash edits."
+  cc_log "bash_guard: ${n} path(s) inside other sessions' claims after Bash"
   return 0
 }

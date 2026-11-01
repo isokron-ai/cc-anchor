@@ -34,6 +34,12 @@
 #   {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"…"}}
 # Hot path when the store has not changed: two builtin mtime tests. Otherwise
 # one or two bounded `kronicle-lite orient --json` calls; fail-open.
+#
+# Extra, WITH sea-lite (0.5.0): Bash claimed-path guard (cc_bg_check, config
+# `bash_guard`). After a Bash call, paths inside live claims held by OTHER
+# sessions that changed during the call are named in additionalContext with
+# holder, ticket and expiry. No process unless such a path changed (the claim
+# list is a cached `sea-lite board`, refreshed at most every bash_guard_ttl s).
 set -u
 CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HERE=.
 # shellcheck source=./lib.sh
@@ -54,5 +60,10 @@ cc_render "$input"
 cc_claims_update "$input"
 cc_sea_heartbeat "$input"
 cc_kl_push "$input"
-[[ -n "$CC_KL_CONTEXT" ]] && cc_emit_context PostToolUse "$CC_KL_CONTEXT"
+cc_bg_check "$input"
+ctx="$CC_BG_CONTEXT"
+[[ -n "$CC_KL_CONTEXT" ]] && ctx="${ctx:+$ctx
+
+}$CC_KL_CONTEXT"
+[[ -n "$ctx" ]] && cc_emit_context PostToolUse "$ctx"
 exit 0
