@@ -291,7 +291,9 @@ cc_resolve_extra() {
 # cc_cfg_raw KEY — raw config value ("" when unset). KEY is lowercase snake_case.
 cc_cfg_raw() {
   local key="$1" envname v f txt
-  envname="CC_ANCHOR_$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+  # bash >= 4 upper-cases without a fork (hot path); stock macOS bash 3.2 forks tr.
+  if (( ${BASH_VERSINFO[0]:-3} >= 4 )); then envname="CC_ANCHOR_${1^^}"
+  else envname="CC_ANCHOR_$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"; fi
   v="${!envname:-}"
   if [[ -n "$v" ]]; then printf '%s' "$v"; return 0; fi
   for f in "${CC_CONFIG:-}" "${CC_CONFIG_HOME:-}"; do
@@ -395,20 +397,70 @@ cc_claims_update() {
   rm -f "$CC_SCOPE_CACHE" 2>/dev/null || true
 }
 
-# cc_claims_live [agent_id|*] — compact JSON array of live claims
-# [{ticket_id, claim_token, expires, agent, session, taken}], newest first.
-# "*" (default) = every agent; "" = main agent only.
+# cc_claims_live [agent_id|*] [session_id|*] — compact JSON array of live
+# claims [{ticket_id, claim_token, expires, agent, session, taken}], newest
+# first. agent "*" (default) = every agent; "" = main agent only. session
+# "*" (default) = every session. claims.json lives in the project's run dir,
+# which every Claude Code session of the project shares, so a guard acting
+# for one session must pass its session_id: another session's claims (and
+# their tokens) are not its business.
 cc_claims_live() {
-  local who="${1-*}"
+  local who="${1-*}" ses="${2-*}"
   [[ -s "$CC_CLAIMS" ]] || { echo '[]'; return 0; }
   cc_have_jq || { echo '[]'; return 0; }
   local now; cc_now_var now
-  jq -c --arg now "$now" --arg who "$who" '
+  jq -c --arg now "$now" --arg who "$who" --arg ses "$ses" '
     (.claims // {}) | to_entries
     | map(.value + {ticket_id: .key})
     | map(select(.expires > $now))
     | map(select($who == "*" or (.agent // "") == $who))
+    | map(select($ses == "*" or $ses == "" or (.session // "") == $ses))
     | sort_by(.taken) | reverse' "$CC_CLAIMS" 2>/dev/null || echo '[]'
+}
+
+# cc_sea_heartbeat <PostToolUse payload> — keep this session's sea-lite
+# leases alive while it works (sea-lite >= 0.4.0). At most once per config
+# `heartbeat_interval` s (default 60) per session, run
+# `sea-lite heartbeat --session <session_id>` in the background; it renews
+# every live claim of the session by its own lease and never revives a
+# lapsed one. Switch `heartbeat`: on / off; unset = on when this project has
+# seen claims (claims.json) or sea-lite is configured. Hot path when not
+# due: bash builtins only (one read of the stamp file).
+cc_sea_heartbeat() {
+  local payload="$1" sid="" now="" last="" stamp iv sw short
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  [[ -n "$sid" ]] || return 0
+  short="${sid//[^A-Za-z0-9]/}"; short="${short:0:8}"
+  stamp="$CC_RUN/hb-${short:-nosession}"
+  printf -v now '%(%s)T' -1 2>/dev/null || now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || now="$(date +%s)"
+  iv="${CC_ANCHOR_HEARTBEAT_INTERVAL:-}"
+  [[ "$iv" =~ ^[0-9]+$ ]] || { iv="$(cc_cfg_raw heartbeat_interval)"; [[ "$iv" =~ ^[0-9]+$ ]] || iv=60; }
+  if [[ -s "$stamp" ]]; then IFS= read -r last < "$stamp" || true; fi
+  if [[ "$last" =~ ^[0-9]+$ ]] && (( now - last < iv )); then return 0; fi
+  # Stamp first: the switch / detection below then costs at most once per interval too.
+  cc_ensure_dirs || return 0
+  printf '%s\n' "$now" > "$stamp" 2>/dev/null || return 0
+  sw="$(cc_cfg_raw heartbeat)"
+  case "$sw" in
+    0|false|no|off) return 0;;
+    1|true|yes|on) ;;
+    *) [[ -s "$CC_CLAIMS" ]] || cc_sea_configured || return 0;;
+  esac
+  local bin ov actor
+  bin="$(cc_find_cli sea-lite)" || { cc_log_once hb_nobin "heartbeat: sea-lite CLI not found; leases renew only on sea-lite tool calls"; return 0; }
+  ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && sid="$ov"
+  actor="$(cc_cfg_raw sea_actor)"
+  local args=(heartbeat --session "$sid")
+  [[ -n "$actor" ]] && args+=(--actor "$actor")
+  [[ -n "${CC_ANCHOR_SEA_DATA_DIR:-}" ]] && args+=(--data-dir "$CC_ANCHOR_SEA_DATA_DIR")
+  local run=("$bin"); [[ "$bin" == *.js || "$bin" == *.mjs ]] && run=(node "$bin")
+  if [[ "${CC_ANCHOR_SYNC:-0}" == "1" ]]; then
+    "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 || true
+  else
+    ( "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 & ) >/dev/null 2>&1
+  fi
+  return 0
 }
 
 # cc_pending_add <claims-json-array> <reason> — append to pending-release.jsonl (dedup by ticket).

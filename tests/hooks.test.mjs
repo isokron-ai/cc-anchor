@@ -564,6 +564,8 @@ test('Stop claim guard reads the switch from .claude/cc-anchor.json (project) an
     fs.rmSync(path.join(sb.proj, '.claude', 'cc-anchor.json'));
     fs.mkdirSync(path.join(sb.home, '.claude', 'cc-anchor'), { recursive: true });
     fs.writeFileSync(path.join(sb.home, '.claude', 'cc-anchor', 'config.json'), JSON.stringify({ claim_guard: 'on' }));
+    // The guard only looks at the stopping session's claims (0.3.0), so give session "third" one of its own.
+    hook('post-tool-use.sh', fixture('posttooluse-sea-claim.json', { cwd: sb.proj, session_id: 'third', tool_input: { ticket_ids: ['tkt_third'] }, tool_response: { content: [{ type: 'text', text: JSON.stringify({ claims: [{ ticket_id: 'tkt_third', claim_token: 't3', expires_at: '2099-01-01T00:00:00Z' }] }) }] } }), sb.env);
     r = hook('stop.sh', fixture('stop.json', { cwd: sb.proj, session_id: 'third' }), sb.env);
     assert.equal(r.json?.decision, 'block', 'user config honoured');
     // the CLI agrees on the effective value
@@ -672,11 +674,15 @@ test('SubagentStop: auto mode is inert without sea-lite configured; CC_ANCHOR_SU
 
 // ───────────── PreToolUse scope guard ─────────────
 
-test('PreToolUse scope guard (docs Edit payload): off by default (no output, no jq); on + conflict => deny in the current hookSpecificOutput shape; verdict cached per path', () => {
+test('PreToolUse scope guard (docs Edit payload): off by default (no output, no sea-lite spawn); on + conflict => deny in the current hookSpecificOutput shape; verdict cached per session and path; a sea_* result drops the cache', () => {
+  // The conflict contract itself is pinned against the REAL sea-lite CLI in
+  // tests/sea-contract.test.mjs. This stub answers in that contract's shape
+  // only to exercise cc-anchor's switch, cache and invalidation.
   const sb = sandbox();
   try {
     const calls = path.join(sb.base, 'scope-calls.log');
-    const bin = fakeCli(sb, 'sea-lite', `echo "$*" >> "${calls}"; [[ "$1" == scope-check ]] || exit 2; if [[ "$3" == *a.ts ]]; then echo '{"conflicts":[{"holder":"agent-b","ticket":"tkt_01B","paths":["src/**"],"expires":"2099-01-01T00:00:00Z"}]}'; exit 1; fi; exit 0`);
+    const conflict = JSON.stringify({ schema: 'sea-lite.scope-check/1', ok: false, conflicts: [{ ticket_id: 'tkt_01B0000000', title: 'B work', holder: 'agent-b', holder_session: null, holder_label: 'agent-b', held: ['src/**'], claim_expires_at: '2099-01-01T00:00:00Z', expires_in_seconds: 9 }] });
+    const bin = fakeCli(sb, 'sea-lite', `echo "$*" >> "${calls}"; [[ "$1" == scope-check ]] || exit 2; if [[ "\${@: -1}" == *a.ts ]]; then echo '${conflict}'; exit 1; fi; exit 0`);
     const on = { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin };
     let r = hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/a.ts` } }), sb.env);
     assert.equal(r.status, 0); assert.equal(r.stdout, '');
@@ -686,9 +692,9 @@ test('PreToolUse scope guard (docs Edit payload): off by default (no output, no 
     assert.deepEqual(Object.keys(r.json), ['hookSpecificOutput']);
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'PreToolUse');
     assert.equal(r.json.hookSpecificOutput.permissionDecision, 'deny');
-    assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /agent-b on ticket tkt_01B \(paths: src\/\*\*; expires 2099/);
+    assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /agent-b on ticket tkt_01B0 \("B work"; locks src\/\*\*; expires 2099/);
     assert.equal(r.json.decision, undefined, 'top-level decision is deprecated for PreToolUse');
-    assert.equal(fs.readFileSync(calls, 'utf8').trim(), `scope-check --paths ${sb.proj}/src/a.ts`);
+    assert.equal(fs.readFileSync(calls, 'utf8').trim(), `scope-check --json --session abc123 ${sb.proj}/src/a.ts`);
     r = hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/a.ts` } }), sb.env, on);
     assert.equal(r.json.hookSpecificOutput.permissionDecision, 'deny');
     assert.equal(fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).length, 1, 'second edit served from the cache');
@@ -992,7 +998,7 @@ test('Cursor adapter: stop → followup_message (claim guard), loop_count>0 maps
     assert.match(r.json.followup_message, /release or hand off your sea-lite claim first[\s\S]*tkt_c1/);
     r = cursorHook('stop', fixture('cursor-stop.json', { ...ws, loop_count: 1 }), env, { CC_ANCHOR_CLAIM_GUARD: '1' });
     assert.equal(r.stdout, '');
-    const bin = fakeCli(sb, 'sea-lite', `[[ "$1" == scope-check ]] && { echo '{"conflicts":[{"holder":"b","ticket":"t","paths":["src/**"],"expires":"2099"}]}'; exit 1; }; exit 2`);
+    const bin = fakeCli(sb, 'sea-lite', `[[ "$1" == scope-check ]] && { echo '{"schema":"sea-lite.scope-check/1","ok":false,"conflicts":[{"holder":"b","holder_label":"b","ticket_id":"t","title":"x","held":["src/**"],"claim_expires_at":"2099"}]}'; exit 1; }; exit 2`);
     r = cursorHook('preToolUse', fixture('cursor-pretooluse.json', { ...ws, cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/a.ts`, content: '' } }), env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin });
     assert.equal(r.json?.permission, 'deny');
     assert.match(r.json.agent_message, /scope guard/);
@@ -1103,7 +1109,7 @@ test('config CLI: show/set/unset round-trip, coercion, unknown key rejected, --s
     const f = `${sb.proj}/t.ts`;
     hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: f } }), sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin });
     const cache = JSON.parse(fs.readFileSync(path.join(sb.run, 'scope-cache.json'), 'utf8'));
-    cache[f].at -= 40; fs.writeFileSync(path.join(sb.run, 'scope-cache.json'), JSON.stringify(cache));
+    cache[`abc123|${f}`].at -= 40; fs.writeFileSync(path.join(sb.run, 'scope-cache.json'), JSON.stringify(cache));
     hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: f } }), sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin });
     assert.equal(fs.readFileSync(path.join(sb.home, 'calls'), 'utf8').trim().split('\n').length, 1, 'still cached at 40 s with scope_ttl=45');
   } finally { sb.cleanup(); }
@@ -1113,7 +1119,7 @@ test('PreToolUse scope guard: NotebookEdit notebook_path and Windows backslash p
   const sb = sandbox();
   try {
     const calls = path.join(sb.base, 'calls');
-    const bin = fakeCli(sb, 'sea-lite', `echo "$3" >> "${calls}"; exit 0`);
+    const bin = fakeCli(sb, 'sea-lite', `echo "\${@: -1}" >> "${calls}"; exit 0`);
     const on = { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin };
     hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_name: 'NotebookEdit', tool_input: { notebook_path: `${sb.proj}/nb.ipynb`, new_source: '' } }), sb.env, on);
     hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_name: 'Write', tool_input: { file_path: 'C:\\project\\src\\index.ts', content: '' } }), sb.env, on);

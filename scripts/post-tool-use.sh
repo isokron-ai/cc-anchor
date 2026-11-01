@@ -22,6 +22,11 @@
 # tagged with the agent_id the hook fired in. That file is what the Stop /
 # SubagentStop guards and the pending-release surfacing read. The branch is
 # a bash regex on tool_name, so every other tool call pays nothing.
+#
+# Extra, WITH sea-lite (0.3.0): lease heartbeat. At most once a minute per
+# session, `sea-lite heartbeat --session <session_id>` runs in the
+# background and renews the session's live claims (cc_sea_heartbeat), so a
+# task longer than one lease keeps its lock. When not due: builtins only.
 set -u
 CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HERE=.
 # shellcheck source=./lib.sh
@@ -40,4 +45,5 @@ cc_resolve "${root:-$PWD}"
 
 cc_render "$input"
 cc_claims_update "$input"
+cc_sea_heartbeat "$input"
 exit 0

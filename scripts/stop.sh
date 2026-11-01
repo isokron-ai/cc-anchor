@@ -46,7 +46,7 @@ decision=""   # JSON object to print, if any
 
 # ── 2. claim guard ────────────────────────────────────────────────────
 if [[ "$active" != "true" ]] && cc_on claim_guard 0 && [[ -s "$CC_CLAIMS" ]]; then
-  live="$(cc_claims_live '*')"
+  live="$(cc_claims_live '*' "$sid")"
   if [[ "$live" != "[]" ]]; then
     key="${sid}:$(jq -r 'map(.ticket_id) | sort | join(",")' <<<"$live" 2>/dev/null)"
     if [[ "$(cc_state_get claim_block_key)" != "$key" ]]; then

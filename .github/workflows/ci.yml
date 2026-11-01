@@ -17,6 +17,8 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck
       - name: Lint
         run: npm run lint
+      - name: Install the real sea-lite CLI for the contract tests
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
       - name: Test
         run: npm test
       - name: Hook hot-path timing
@@ -30,7 +32,7 @@ jobs:
           pre='{"session_id":"ci","cwd":"/tmp/proj","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/tmp/proj/src/a.ts","old_string":"a","new_string":"b"}}'
           start=$(date +%s%N); for i in $(seq 10); do echo "$pre" | bash scripts/pre-tool-use.sh; done; end=$(date +%s%N)
           echo "PreToolUse (scope guard off) mean: $(( (end - start) / 10000000 )) ms"
-          printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/sea-lite && chmod +x /tmp/sea-lite
+          printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/sea-lite && chmod +x /tmp/sea-lite   # timing only; the contract is tested against the real CLI
           export CC_ANCHOR_SCOPE_GUARD=1 CC_ANCHOR_SEA_LITE_BIN=/tmp/sea-lite
           echo "$pre" | bash scripts/pre-tool-use.sh
           start=$(date +%s%N); for i in $(seq 10); do echo "$pre" | bash scripts/pre-tool-use.sh; done; end=$(date +%s%N)
@@ -58,5 +60,7 @@ jobs:
           node-version: 22
       - name: Install jq
         run: brew install jq
+      - name: Install the real sea-lite CLI for the contract tests
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
       - name: Test on macOS (BSD date, Homebrew bash)
         run: npm test

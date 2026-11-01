@@ -108,9 +108,13 @@ export const CONFIG_KEYS = {
   subagent_release: { default: 'auto', hook: 'SubagentStop', doc: 'block the subagent once + queue pending releases for its claims (auto = when sea-lite is configured)' },
   task_mirror: { default: false, hook: 'TaskCreated/TaskCompleted', doc: 'mirror Claude Code tasks into sea-lite tickets (idempotency key cc-task:<id>)' },
   task_mirror_gate: { default: true, hook: 'TaskCompleted', doc: 'with task_mirror: block completion while the ticket has open predecessors' },
-  scope_guard: { default: false, hook: 'PreToolUse', doc: 'deny Edit/Write inside another actor\'s live claim scope (sea-lite scope-check)' },
-  scope_ttl: { default: 30, hook: 'PreToolUse', doc: 'seconds a scope verdict is cached per path' },
+  scope_guard: { default: false, hook: 'PreToolUse', doc: 'deny Edit/Write inside someone else\'s live sea-lite claim (another actor, or this actor in another session; needs sea-lite >= 0.4.0)' },
+  scope_ttl: { default: 30, hook: 'PreToolUse', doc: 'seconds a scope verdict is cached per session and path' },
   scope_timeout: { default: 4, hook: 'PreToolUse', doc: 'seconds to wait for sea-lite scope-check before failing open' },
+  heartbeat: { default: 'auto', hook: 'PostToolUse', doc: 'renew this session\'s sea-lite leases in the background (auto = when claims were seen or sea-lite is configured)' },
+  heartbeat_interval: { default: 60, hook: 'PostToolUse', doc: 'minimum seconds between two lease heartbeats per session' },
+  sea_session: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'session to act as instead of the hook\'s session_id (Cursor: the --session your sea-lite server runs with)' },
+  sea_actor: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'pass --actor to sea-lite (default: the session\'s own server actor; every claim of the session counts as yours)' },
 };
 
 export function readConfig(p) {
