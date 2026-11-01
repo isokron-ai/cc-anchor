@@ -4,7 +4,7 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
-## [Unreleased]
+## [0.4.0] — 2026-11-01
 
 ### Fixed
 - **macOS: the retraction push re-read kronicle-lite on every tool call in
@@ -33,7 +33,6 @@ SemVer.
   one-liners). A here-doc written to a file is not run and stays quiet.
   Corpus: 74/74 detected, 0/11 false alarms (in-repo copy, 85 cases).
 
-## [0.4.0] — 2026-11-01
 
 The one strong live-agent result from agent-memory-bench Track B, shipped:
 T1 (the runbook changes mid-session) went 0/36 for every pull setup and
