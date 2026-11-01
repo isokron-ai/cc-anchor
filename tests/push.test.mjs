@@ -181,3 +181,19 @@ test('hooks.json registers the pulse on Bash and keeps the scope guard on edits'
   assert.ok(pre.some((e) => /Edit/.test(e.matcher) && e.hooks.some((h) => /pre-tool-use\.sh/.test(h.args.join(' ')))));
   for (const e of [...j.hooks.PostToolUse, ...pre]) for (const h of e.hooks) assert.ok(h.timeout >= 10, 'room for two bounded orient calls');
 });
+
+test('the kronicle-lite CLI is found in the npx cache (plugin-only installs launch the server with npx)', () => {
+  const sb = sandbox();
+  try {
+    const dir = path.join(sb.home, '.npm', '_npx', '0a1b2c', 'node_modules', 'kronicle-lite', 'dist');
+    fs.mkdirSync(dir, { recursive: true });
+    const calls = path.join(sb.base, 'calls');
+    fs.writeFileSync(path.join(dir, 'cli.js'), `require('fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ') + '\\n'); process.exit(1);\n`);
+    fs.writeFileSync(path.join(dir, '..', 'package.json'), '{"name":"kronicle-lite","version":"0.6.0"}');
+    // npm test puts node_modules/.bin (with a real kronicle-lite) on PATH; keep it out.
+    const PATH = process.env.PATH.split(':').filter((d) => !d.includes('node_modules')).join(':');
+    post(sb, { CC_ANCHOR_KRONICLE: '1', PATH });
+    assert.match(fs.readFileSync(calls, 'utf8'), /^orient --json --actor cc-anchor-sessunit/m);
+    assert.match(fs.readFileSync(path.join(sb.run, 'push', 'sessunit.cfg'), 'utf8'), /_npx\/0a1b2c\/node_modules\/kronicle-lite\/dist\/cli\.js/);
+  } finally { sb.cleanup(); }
+});

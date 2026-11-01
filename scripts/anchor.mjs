@@ -202,6 +202,11 @@ export function findCli(name, env = process.env) {
     const f = path.join(cache, mk, plug, ver, 'node_modules', name, 'dist', 'cli.js');
     if (fs.existsSync(f)) return f;
   }
+  const npx = path.join(env.npm_config_cache || path.join(home, '.npm'), '_npx');
+  for (const h of dirs(npx)) {
+    const f = path.join(npx, h, 'node_modules', name, 'dist', 'cli.js');
+    if (fs.existsSync(f)) return f;
+  }
   return null;
 }
 

@@ -265,8 +265,10 @@ not retried for 60 s. The store is the one the kronicle MCP server uses:
 `kronicle_data_dir` / `CC_ANCHOR_KRONICLE_DATA_DIR`, else the server's
 `--data-dir` (or `KRONICLE_LITE_DATA_DIR` env) in `.mcp.json` /
 `~/.claude.json`, else `$KRONICLE_LITE_DATA_DIR`, else `~/.kronicle-lite`.
-Needs kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and
-0.6.0.
+The CLI is looked up like the other hooks do (`CC_ANCHOR_KRONICLE_LITE_BIN`,
+`PATH`, the plugin cache, `node_modules`) and finally in the npx cache, where
+the isokron-plugins `npx -y kronicle-lite@… serve` launch leaves it. Needs
+kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 
 | Switch | Default | |
 |---|---|---|
@@ -503,7 +505,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 105 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 106 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

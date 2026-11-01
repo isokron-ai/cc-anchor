@@ -37,6 +37,10 @@ without it.
   world-changing step after another non-inert step is denied once with
   "run it as its own Bash call"; `cd`/`export`/`echo`/read-only steps do not
   count. `pulse_chain: check` allows chains.
+- The kronicle-lite / sea-lite CLI is also found in the npx cache
+  (`~/.npm/_npx/*/node_modules/<name>/dist/cli.js`): the isokron-plugins
+  marketplace launches its servers with `npx -y <name>@<pin> serve`, so a
+  plugin-only install has the CLI nowhere else.
 - Config `push_timeout` (3 s per CLI call), `kronicle_data_dir` (else the
   kronicle MCP server's `--data-dir` / `KRONICLE_LITE_DATA_DIR` from
   `.mcp.json` or `~/.claude.json`, else the CLI default).

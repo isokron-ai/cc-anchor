@@ -344,16 +344,21 @@ cc_sea_configured() {
 # cc_find_cli NAME — echo the path of the kronicle-lite / sea-lite CLI (an
 # executable on PATH or a dist/cli.js to run with node), or nothing.
 # Order: CC_ANCHOR_<NAME>_BIN, PATH, the Claude Code plugin cache (the
-# isokron plugins pin the package under node_modules), <root>/node_modules.
+# isokron plugins pin the package under node_modules), <root>/node_modules,
+# the npx cache (~/.npm/_npx/*/node_modules).
 cc_find_cli() {
   local name="$1" envname v f
   envname="CC_ANCHOR_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')_BIN"
   v="${!envname:-}"
   if [[ -n "$v" ]]; then printf '%s' "$v"; return 0; fi
   if v="$(command -v "$name" 2>/dev/null)"; then printf '%s' "$v"; return 0; fi
+  # Last: the npx cache. The isokron-plugins marketplace launches the MCP
+  # servers with `npx -y <name>@<pin> serve`, so a plugin-only install has
+  # the CLI there and nowhere else.
   for f in "${HOME}"/.claude/plugins/cache/*/"$name"/*/node_modules/"$name"/dist/cli.js \
            "${HOME}"/.claude/plugins/cache/*/*/*/node_modules/"$name"/dist/cli.js \
-           "${CC_ROOT}"/node_modules/"$name"/dist/cli.js; do
+           "${CC_ROOT}"/node_modules/"$name"/dist/cli.js \
+           "${npm_config_cache:-${HOME}/.npm}"/_npx/*/node_modules/"$name"/dist/cli.js; do
     [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
   done
   return 1
