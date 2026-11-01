@@ -24,14 +24,23 @@ SemVer.
   seen sea-lite claims or sea-lite is configured; `bash_guard_ttl` 30 s).
   The Edit/Write scope guard never sees `sed -i`, redirects, formatters or
   codegen run through Bash. Now the Bash `PreToolUse` stamps the call
-  (builtin write of its `tool_use_id`) and `PostToolUse` walks only the
-  paths other sessions hold — from a cached `sea-lite board --json`,
+  (per-call stamp file) and `PostToolUse` checks only the paths other
+  sessions hold — from a cached `sea-lite board --json`,
   refreshed at most every `bash_guard_ttl` s and dropped on any `sea_*`
   result — with builtin `-ot` tests against that stamp. A changed, new or
   removed path is named at once with holder, ticket, title and expiry; one
   `git status --porcelain --ignored=matching` over just those paths first
-  drops git-ignored output. Nothing changed in a claimed path: no process.
-  Fail-open; contract-tested with the real sea-lite CLI.
+  drops git-ignored output. Fail-open; contract-tested with the real
+  sea-lite CLI.
+  Hardened against the stress suite (agent-memory-bench
+  stress/cca/bash-guard.sh, 13/13): change time as well as mtime (one
+  `find -newer|-cnewer` per Bash call while a foreign claim exists), so
+  `cp -p` / `cp -a`, `tar -x`, `mv` over a claimed file and `touch -r`
+  back-dating are caught; one stamp per `tool_use_id` (overlapping calls);
+  the claim cache is refreshed as soon as the sea-lite store file changes
+  (a claim made seconds ago is seen); no walk budget — a `find` that times
+  out falls back to `git status` over the claimed paths. No foreign claim:
+  still no process.
 
 #### Fixed
 - **Empty card at startup.** `InstructionsLoaded` renders the template card
