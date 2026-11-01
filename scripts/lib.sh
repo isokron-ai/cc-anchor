@@ -723,7 +723,7 @@ cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
 cc_kl_init() {
   cc_kl_backoff && return 1
   local pre="$CC_KL_B.stamp.$$" out rc cur seq
-  : > "$pre" 2>/dev/null || return 1
+  cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
   IFS=$'\x1f' read -r cur seq < <(jq -r '[(.cursor // ""), ((.head.seq // "") | tostring)] | join("\u001f")' <<<"$out" 2>/dev/null)
@@ -734,26 +734,84 @@ cc_kl_init() {
   return 0
 }
 
-# 0 when the store cannot have changed since the stamp (builtins only).
+# The stamp is touched just BEFORE a read of the chain and holds that
+# moment's epoch second, for the tie rule below.
+cc_kl_prestamp() {  # <file>
+  local now; cc_epoch_now_var now
+  printf '%s\n' "$now" > "$1" 2>/dev/null
+}
+
+# Compare two files' mtimes the way `test` sees them: echo older|newer|tie.
+# bash 3.2 (macOS /bin/bash) compares whole seconds; bash >= 5.1 uses the
+# filesystem's precision. CC_ANCHOR_TEST_MTIME_SECONDS=1 forces the 1-second
+# view on any host (tests), via date -r (GNU and BSD).
+cc_mtime_cmp() {  # <a> <b>
+  if [[ "${CC_ANCHOR_TEST_MTIME_SECONDS:-0}" == 1 ]]; then
+    local x y; x="$(date -r "$1" +%s 2>/dev/null)"; y="$(date -r "$2" +%s 2>/dev/null)"
+    if (( x < y )); then echo older; elif (( x > y )); then echo newer; else echo tie; fi
+    return 0
+  fi
+  if [[ "$1" -ot "$2" ]]; then echo older; elif [[ "$1" -nt "$2" ]]; then echo newer; else echo tie; fi
+}
+
+# cc_kl_unchanged [strict] — 0 when the store cannot have changed since the
+# stamp. Hot path: builtin `-ot` tests, no process.
+#   older than the stamp  -> unchanged
+#   newer than the stamp  -> changed
+#   a tie at `test`'s granularity (1 s with bash 3.2, the macOS default):
+#     the store was written in the same second as our last read. Re-reading
+#     on every tie made every tool call in that second spawn kronicle-lite
+#     (macOS CI). Instead one `find -newer` settles it at the filesystem's
+#     own precision (ns on APFS / ext4): stamp newer -> unchanged, store
+#     newer -> changed. Only a tie even there (1-s filesystem, or one kernel
+#     tick) stays ambiguous: the pulse (`strict`, before a world-changing
+#     command) re-reads; the push re-reads once the clock has left the
+#     stamp's second, so a store write costs at most one extra read and a
+#     write landing in that same second right after our read reaches the
+#     agent at its next tool call in a later second.
 cc_kl_unchanged() {
   [[ -e "$CC_KL_B.stamp" ]] || return 1
-  local db="${CC_KL_DD:-${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}}/kronicle-lite.db"
+  local db="${CC_KL_DD:-${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}}/kronicle-lite.db" f c
+  local -a tied=()
   [[ -e "$db" ]] || return 1
-  [[ "$db" -ot "$CC_KL_B.stamp" ]] || return 1
-  [[ ! -e "$db-wal" || "$db-wal" -ot "$CC_KL_B.stamp" ]]
+  for f in "$db" "$db-wal"; do
+    [[ -e "$f" ]] || continue
+    if [[ "${CC_ANCHOR_TEST_MTIME_SECONDS:-0}" != 1 ]]; then
+      [[ "$f" -ot "$CC_KL_B.stamp" ]] && continue
+      [[ "$f" -nt "$CC_KL_B.stamp" ]] && return 1
+    else
+      c="$(cc_mtime_cmp "$f" "$CC_KL_B.stamp")"
+      [[ "$c" == older ]] && continue
+      [[ "$c" == newer ]] && return 1
+    fi
+    tied+=("$f")
+  done
+  (( ${#tied[@]} == 0 )) && return 0
+  local equal=0
+  for f in "${tied[@]}"; do
+    if [[ -n "$(find "$CC_KL_B.stamp" -newer "$f" -print 2>/dev/null)" ]]; then continue
+    elif [[ -n "$(find "$f" -newer "$CC_KL_B.stamp" -print 2>/dev/null)" ]]; then return 1
+    else equal=1; fi
+  done
+  (( equal )) || return 0
+  [[ "${1:-}" == strict ]] && return 1
+  local t="" now; IFS= read -r t < "$CC_KL_B.stamp" || true
+  [[ "$t" =~ ^[0-9]+$ ]] || return 1
+  cc_epoch_now_var now
+  (( now <= t ))
 }
 
 # cc_kl_fetch — new retractions since this session's cursor. Returns 0 when
 # the head moved and the retractions were fetched (KL_SHOWN may still be 0),
 # 1 when nothing changed, the CLI failed (fail open) or no cursor existed yet.
 # Sets KL_BODY ("- …" lines), KL_SHOWN, KL_BLOCK, KL_COS, KL_SEQ.
-cc_kl_fetch() {
+cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
   if [[ ! -s "$CC_KL_B.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
-  cc_kl_unchanged && return 1
+  cc_kl_unchanged "${1:-}" && return 1
   cc_kl_backoff && return 1
   local pre="$CC_KL_B.stamp.$$" out rc seq stored="" cur=""
-  : > "$pre" 2>/dev/null || return 1
+  cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
   seq="$(jq -r '.head.seq // empty' <<<"$out" 2>/dev/null)"
