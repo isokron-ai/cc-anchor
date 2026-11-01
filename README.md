@@ -467,7 +467,7 @@ Install (project scope — the file is meant to be committed; `--scope user`
 writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
 
 ```sh
-node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.3.0/scripts/anchor.mjs cursor install
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.4.0/scripts/anchor.mjs cursor install
 # or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
 ```
 

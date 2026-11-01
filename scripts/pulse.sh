@@ -80,7 +80,7 @@ pending=""
 [[ -s "$CC_KL_B.pending" ]] && pending="$(cat "$CC_KL_B.pending" 2>/dev/null)"
 had_integ=0; [[ -s "$CC_KL_S.integrity" ]] && had_integ=1
 CC_KL_FAILED=0
-cc_kl_fetch || true
+cc_kl_fetch strict || true
 
 # A store that reports integrity.ok=false blocks world-changing commands
 # until it is repaired (re-checked right now if the failure is older than

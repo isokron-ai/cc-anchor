@@ -65,5 +65,11 @@ jobs:
         run: brew install jq
       - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
         run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0
+      - name: Which bash the hooks get
+        run: command -v -a bash; bash --version | head -1; /bin/bash --version | head -1
       - name: Test on macOS (BSD date, Homebrew bash)
         run: npm test
+      - name: Hook tests under macOS /bin/bash 3.2 (1-second mtimes)
+        run: |
+          mkdir -p /tmp/bash32 && ln -sf /bin/bash /tmp/bash32/bash
+          PATH="/tmp/bash32:$PATH" node --test --test-concurrency=1 tests/kronicle-contract.test.mjs tests/push.test.mjs tests/integrity.test.mjs

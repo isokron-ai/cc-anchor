@@ -79,8 +79,8 @@ test('push (real CLI): a retraction that lands during a tool call is injected af
   } finally { w.sb.cleanup(); }
 });
 
-test('push (real CLI): the hot path does not spawn kronicle-lite while the store is unchanged', opts, () => {
-  const w = world();
+for (const [label, env] of [['', {}], [' — 1-second mtime view (bash 3.2 / macOS)', { CC_ANCHOR_TEST_MTIME_SECONDS: '1' }]]) test(`push (real CLI): the hot path does not spawn kronicle-lite while the store is unchanged${label}`, opts, () => {
+  const w = world({ env });
   try {
     w.start();
     w.post('a'); // settles the gate after init
@@ -267,5 +267,38 @@ test('pulse (real CLI): a world-changing interpreter one-liner is denied ONCE; t
     assert.match(w.reason(d), /run this exact call again/);
     assert.equal(w.pre(cmd).stdout, '', 'retry allowed');
     assert.equal(w.decision(w.pre("node -e \"require('child_process').execSync('npm publish')\"")), 'deny', 'a different one-liner is denied once too');
+  } finally { w.sb.cleanup(); }
+});
+
+test('push/pulse (real CLI): an exact mtime tie (1-s filesystem, one kernel tick) — the push re-reads once per second at most, the pulse always', opts, () => {
+  const w = world();
+  try {
+    w.start();
+    w.post('a');
+    const shim = path.join(w.sb.base, 'kl-shim');
+    const calls = path.join(w.sb.base, 'calls');
+    fs.writeFileSync(shim, `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(calls)}\nexec node ${JSON.stringify(KL)} "$@"\n`, { mode: 0o755 });
+    const cfg = path.join(w.sb.run, 'push', 'sesskl00.cfg');
+    const [dd] = fs.readFileSync(cfg, 'utf8').split('\n');
+    fs.writeFileSync(cfg, `${dd}\n${shim}\n`);
+    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0);
+    const stamp = path.join(w.sb.run, 'push', 'sesskl00.stamp');
+    const db = path.join(w.data, 'kronicle-lite.db');
+    const tie = (stampSecondsAgo) => {
+      const t = Math.floor(Date.now() / 1000) - 5;
+      fs.utimesSync(db, t, t); fs.utimesSync(stamp, t, t); // identical at every precision
+      fs.writeFileSync(stamp, `${Math.floor(Date.now() / 1000) - stampSecondsAgo}\n`);
+      fs.utimesSync(stamp, t, t);
+    };
+    tie(0);
+    w.post('same second as our read');
+    assert.equal(n(), 0, 'push: tie inside the stamp\'s second → no spawn');
+    w.pre('./bin/deploy --target staging-a');
+    assert.equal(n(), 1, 'pulse: a tie always re-reads (one read-only pulse)');
+    tie(3);
+    w.post('a later second');
+    assert.equal(n(), 2, 'push: tie from an earlier second → one re-read…');
+    w.post('again');
+    assert.equal(n(), 2, '…which stamps a later second: settled');
   } finally { w.sb.cleanup(); }
 });

@@ -50,7 +50,24 @@ SemVer.
   is still the untouched template; one real project, goal or invariant is
   enough to inject it, and `compact` always injects.
 
-### push-hook release
+### Fixed (also on main via macos-hotpath)
+- **macOS: the retraction push re-read kronicle-lite on every tool call in
+  the second after a store write.** The mtime gate compares the store with
+  the session's stamp using bash's `-ot`/`-nt`; macOS `/bin/bash` 3.2
+  compares whole seconds, so a store written in the same second as our last
+  read (for instance our own `orient`'s flight-recorder write) tied, and
+  every tie re-read the store — one node + sqlite spawn per tool call until
+  the clock moved on (macOS CI: "no orient call on an unchanged store").
+  It never looped forever (the read-only pulse doesn't write), but bursts
+  were real. A tie is now settled by one `find -newer` at the filesystem's
+  own precision (ns on APFS / ext4); only an exact tie there (1-s
+  filesystem, one kernel tick) stays ambiguous: the pulse before a
+  world-changing command always re-reads, the push re-reads once the clock
+  has left the stamp's second. Reproduced on Linux with a forced 1-second
+  view (`CC_ANCHOR_TEST_MTIME_SECONDS=1`, test-only); the hot-path test now
+  runs in both views, plus an exact-tie test.
+
+## [0.4.0] — 2026-11-01
 
 The one strong live-agent result from agent-memory-bench Track B, shipped:
 T1 (the runbook changes mid-session) went 0/36 for every pull setup and
