@@ -236,7 +236,7 @@ test('per-subagent cursors (real CLI): a change the parent has not consumed yet 
     w.spawn('agent-c3');
     assert.match(w.ctx(w.post('c', undefined, {}, 'agent-c3')) || '', /staging-c/);
     assert.match(w.ctx(w.post('p')) || '', /staging-c/, 'the parent still gets it');
-    const f = path.join(w.sb.run, 'push', 'sesskl00.a-agentc3.cursor');
+    const f = path.join(w.sb.run, 'push', 'sesskl00.a-agent-c3.cursor');
     assert.ok(fs.existsSync(f));
     w.stopAgent('agent-c3');
     assert.ok(!fs.existsSync(f), 'SubagentStop drops the subagent cursor');
@@ -300,5 +300,22 @@ test('push/pulse (real CLI): an exact mtime tie (1-s filesystem, one kernel tick
     assert.equal(n(), 2, 'push: tie from an earlier second → one re-read…');
     w.post('again');
     assert.equal(n(), 2, '…which stamps a later second: settled');
+  } finally { w.sb.cleanup(); }
+});
+
+test('per-subagent cursors (real CLI): ids that share a long prefix, or are long / not filename-safe, never share a cursor', opts, () => {
+  const w = world();
+  try {
+    w.start(); w.post('p0');
+    const ids = ['agent-0123456789abcdefX', 'agent-0123456789abcdefY', `agent:${'z'.repeat(80)}/1`, `agent:${'z'.repeat(80)}/2`];
+    for (const id of ids) w.spawn(id);
+    w.put(RB('staging-k'));
+    for (const id of ids) {
+      assert.match(w.ctx(w.post('a', undefined, {}, id)) || '', /staging-k/, `${id.slice(0, 30)}… gets it`);
+      assert.equal(w.ctx(w.post('b', undefined, {}, id)), null, 'exactly once');
+    }
+    const files = fs.readdirSync(path.join(w.sb.run, 'push')).filter((f) => /\.a-.*\.cursor$/.test(f));
+    assert.equal(files.length, 4, files.join(', '));
+    assert.ok(files.includes('sesskl00.a-agent-0123456789abcdefX.cursor'), 'a filename-safe id is kept whole');
   } finally { w.sb.cleanup(); }
 });

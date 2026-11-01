@@ -6,7 +6,7 @@
 # that lands while subagents run is delivered to EACH of them and to the
 # parent, exactly once each, instead of to whichever agent's tool call
 # happened to fire first. Subagent tool events carry `agent_id`; the push
-# and the pulse key their cursor files on it (<run>/push/<sid8>.a-<agent>).
+# and the pulse key their cursor files on it (<run>/push/<sid8>.a-<agent_id>, or a hash of the whole id).
 #
 # Inert unless the retraction push is on (kronicle-lite configured). No
 # kronicle-lite process: the seed is a file copy. Silent; exit 0 always.

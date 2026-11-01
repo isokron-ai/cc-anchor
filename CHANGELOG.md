@@ -11,7 +11,9 @@ SemVer.
 #### Added
 - **Per-subagent retraction cursors.** Subagent tool events carry
   `agent_id`; the push and the pulse now key their cursor, seq, stamp and
-  pending files on it (`push/<sid8>.a-<agent>.*`; the main agent keeps
+  pending files on the whole `agent_id` (`push/<sid8>.a-<agent_id>.*`, or a
+  hash of the whole id when it is long or not filename-safe — never a
+  prefix, so two subagents can't share a cursor; the main agent keeps
   `push/<sid8>.*`). A new `SubagentStart` hook seeds each subagent's cursor
   from the main agent's (a file copy, no kronicle-lite call), so a
   retraction that lands while subagents run reaches each subagent and the

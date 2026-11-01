@@ -615,7 +615,8 @@ cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
 # cc_kl_session <session_id> [agent_id] — file prefixes (builtins only).
 #   CC_KL_S  per session: cfg / off / fail (the CLI and its health are shared)
 #   CC_KL_B  per AGENT:   cursor / seq / stamp / pending. The main agent is
-#            "<sid8>", a subagent "<sid8>.a-<agent16>". Each subagent has its
+#            "<sid8>", a subagent "<sid8>.a-<agent_id>" (or "a-h<hash of the
+#            whole id>" when it is long or not filename-safe). Each subagent has its
 #            own cursor, seeded from the main agent's at SubagentStart, so a
 #            retraction one agent consumed still reaches its siblings and the
 #            parent (each exactly once).
@@ -623,7 +624,13 @@ cc_kl_session() {
   local s="${1:-nosession}" a="${2:-}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
   CC_KL_SID="${s:-nosession}"
   CC_KL_S="$CC_RUN/push/$CC_KL_SID"
-  a="${a//[^A-Za-z0-9]/}"; CC_KL_AGENT="${a:0:16}"
+  # agent_id is an opaque string (docs: "agent-abc123", "def456"). Keep it
+  # whole when it is filename-safe and short — distinct ids then get distinct
+  # files with no process; otherwise a hash of the WHOLE id (never a prefix
+  # of it: two subagents must not share a cursor).
+  if [[ -z "$a" ]]; then CC_KL_AGENT=""
+  elif (( ${#a} <= 64 )) && [[ "$a" =~ ^[A-Za-z0-9_-]+$ ]]; then CC_KL_AGENT="$a"
+  else CC_KL_AGENT="h$(cc_hash "$a")"; fi
   if [[ -n "$CC_KL_AGENT" ]]; then CC_KL_B="$CC_KL_S.a-$CC_KL_AGENT"; else CC_KL_B="$CC_KL_S"; fi
 }
 
