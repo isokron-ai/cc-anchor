@@ -13,6 +13,11 @@
 #   * a store that reports integrity.ok=false (corrupt / tampered chain):
 #     denied until a fresh read says it is ok again.
 #
+# kronicle-lite >= 0.8.0 (`pending` in every orient briefing): the first two
+# are replaced by the version-bound gate — denied while pending_count > 0
+# for the agent's actor (--pending-actor; per subagent when it named its own
+# actor_id); cleared only by re-reading the current version.
+#
 # A blocking one (semantic, severity safety|behavioral; cosmetic only when
 # kronicle-lite says so) DENIES the command with the diff in the reason: the
 # agent re-reads and runs it again. `pulse_mode: warn` allows the command and
@@ -76,6 +81,10 @@ head="$(jq -r '.head' <<<"$an" 2>/dev/null)"
 mode="$(cc_cfg_raw pulse_mode)"; [[ "$mode" == warn ]] || mode="deny"
 chain="$(cc_cfg_raw pulse_chain)"; [[ "$chain" == check ]] || chain="split"
 
+# A world-changing command was attempted: the push's "still pending" reminder
+# is moot from here on (this gate shows the items).
+: > "$CC_KL_B.wcattempt" 2>/dev/null || true
+
 pending=""
 [[ -s "$CC_KL_B.pending" ]] && pending="$(cat "$CC_KL_B.pending" 2>/dev/null)"
 had_integ=0; [[ -s "$CC_KL_S.integrity" ]] && had_integ=1
@@ -94,6 +103,38 @@ if [[ -s "$CC_KL_S.integrity" ]]; then
     else
       cc_log "pulse: denied \`${head:0:60}\` (store integrity failure)"
       cc_emit_deny "cc-anchor pulse: did NOT run \`${head}\` — ${itext#cc-anchor: }"
+    fi
+    exit 0
+  fi
+fi
+
+# kronicle-lite >= 0.8.0 reports `pending` per actor: every change to what
+# THIS agent's actor read that it has not re-read at the current version.
+# That is the gate: deny while pending_count > 0; re-reading (recall /
+# kronicle://docs/<slug>) clears it with no manual step, and receiving a push
+# never does. Older kronicle-lite: the retraction-since-last-look logic below.
+if [[ -e "$CC_KL_S.klcap" ]] || [[ ! -e "$CC_KL_S.klnocap" && "$CC_KL_FAILED" != 1 ]]; then
+  [[ -s "$CC_KL_B.klpend" ]] || cc_kl_pending_refresh || true
+fi
+if [[ -e "$CC_KL_S.klcap" && -s "$CC_KL_B.klpend" ]]; then
+  rm -f "$CC_KL_B.pending" 2>/dev/null; pending=""; KL_BLOCK=0
+  pc="$(cc_kl_pending_count)"
+  if [[ "$pc" =~ ^[0-9]+$ ]] && (( pc > 0 )); then
+    phead=""; IFS= read -r phead < "$CC_KL_B.klpend"
+    IFS=$'\x1f' read -r _ phid pact _ <<<"$phead"
+    items="$(tail -n +2 "$CC_KL_B.klpend" 2>/dev/null)"
+    [[ "$phid" =~ ^[1-9][0-9]*$ ]] && items="${items}
+- (+${phid} pending about other projects' documents, not listed)"
+    if [[ "$mode" == warn ]]; then
+      cc_log "pulse: warned before \`${head:0:60}\` (${pc} pending for ${pact})"
+      cc_emit_context PreToolUse "cc-anchor pulse (warn): \`${head}\` is about to run, but ${pc} kronicle-lite change(s) you (actor ${pact}) relied on are not re-read at their current version:
+${items}
+Check that this command uses the current values; if not, stop and re-run it with them."
+    else
+      cc_log "pulse: denied \`${head:0:60}\` (${pc} pending for ${pact})"
+      cc_emit_deny "cc-anchor pulse: did NOT run \`${head}\` — ${pc} kronicle-lite change(s) you (actor ${pact}) relied on are not re-read at their current version:
+${items}
+Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change does not. Then check the values this command uses and run it again$( [[ "$chain" == split && "$an" != *'"risky":[]'* ]] && printf ' as its own Bash call' )."
     fi
     exit 0
   fi

@@ -117,6 +117,8 @@ export const CONFIG_KEYS = {
   sea_actor: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'pass --actor to sea-lite (default: the session\'s own server actor; every claim of the session counts as yours)' },
   push: { default: 'auto', hook: 'PostToolUse', doc: 'inject kronicle-lite retractions that landed since the last tool call (auto = when kronicle-lite is configured)' },
   push_timeout: { default: 3, hook: 'PostToolUse/PreToolUse', doc: 'seconds per kronicle-lite orient call before the push/pulse fails open' },
+  kronicle_actor: { default: '', hook: 'PostToolUse/PreToolUse', doc: 'the agent\'s kronicle-lite actor for `pending` (default: the kronicle server\'s --actor in .mcp.json, else $KRONICLE_LITE_ACTOR, else local-agent)' },
+  push_reminder_after: { default: 15, hook: 'PostToolUse', doc: 'tool calls a delivered change may stay pending (kronicle-lite >= 0.8.0) before one reminder line; 0 = never' },
   push_offline_after: { default: 20, hook: 'PostToolUse', doc: 'consecutive calls the kronicle-lite feed may be unreadable (CLI missing / failing / timing out) before one "feed offline" advisory; 0 = never' },
   push_cosmetic: { default: false, hook: 'PostToolUse/PreToolUse', doc: 'also show retractions kronicle-lite marks cosmetic (they never block)' },
   pulse: { default: 'auto', hook: 'PreToolUse (Bash)', doc: 'check retractions before world-changing Bash commands (auto = with the push)' },

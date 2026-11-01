@@ -4,11 +4,34 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
-## [Unreleased]
+## [0.5.0] — 2026-11-01
 
-### Next cycle (branch `next-cycle`; not part of the push-hook release)
+Version-bound reconciliation with kronicle-lite 0.8.0 (`pending`), per-agent
+state for subagents, and a guard for Bash edits inside other sessions'
+sea-lite claims. Works with kronicle-lite 0.5.0 – 0.7.0 as before (the
+pending gate switches on when kronicle-lite reports `pending`).
 
-#### Added
+### Added
+- **Pending gate (kronicle-lite ≥ 0.8.0).** Delivered is not reconciled:
+  every `orient` call now passes `--pending-actor <the agent's actor>`, and
+  when the briefing carries `pending_count` the pulse denies world-changing
+  commands while it is > 0, listing each item (document › heading, the
+  version read → the current one, the diff, kronicle-lite's own resolve
+  hint, notes derived from it). Re-reading the current version (recall,
+  `kronicle://docs/<slug>`) clears it with no manual step; receiving the
+  push or retrying the command never does. `pulse_mode: warn` still only
+  warns; an integrity failure still blocks first. Against kronicle-lite
+  ≤ 0.7.0 the 0.4.0 "retraction since the last look" logic stays in
+  charge. The agent's actor: `kronicle_actor` / `CC_ANCHOR_KRONICLE_ACTOR`,
+  else the kronicle server's `--actor` / `KRONICLE_LITE_ACTOR` in
+  `.mcp.json` or `~/.claude.json`, else `local-agent` (the server default);
+  per agent, an `actor_id` the agent itself passes to a kronicle-lite tool
+  wins (subagents with their own actor are gated on their own reads).
+- **One "still pending" reminder** (`push_reminder_after`, 15; 0 = off): a
+  delivered change is never re-pushed, but if it is still pending that many
+  tool calls later and no world-changing command was attempted meanwhile
+  (the pulse would have shown it), the push adds one reminder line. A new
+  pending episode after a re-read gets its own.
 - **Per-subagent retraction cursors.** Subagent tool events carry
   `agent_id`; the push and the pulse now key their cursor, seq, stamp and
   pending files on the whole `agent_id` (`push/<sid8>.a-<agent_id>.*`, or a
@@ -44,7 +67,7 @@ SemVer.
   out falls back to `git status` over the claimed paths. No foreign claim:
   still no process.
 
-#### Fixed
+### Fixed
 - **Empty card at startup.** `InstructionsLoaded` renders the template card
   ("Project: (unset …)", "Goal: (unset …)", "- (none …)") before
   `SessionStart` runs, so every new session got that empty card injected.

@@ -42,7 +42,7 @@ const focus = a[a.indexOf('--focus') + 1];
 fs.appendFileSync(${JSON.stringify(state)} + '.calls', focus + '\\n');
 const head = { seq: st.seq, hash: 'h' };
 if (focus === 'pulse') console.log(JSON.stringify({ cursor: 'sxt1.c' + st.seq, cursor_compact: 'sxt1c.' + st.seq + '.x', head, integrity: null, retractions: null }));
-else console.log(JSON.stringify({ cursor: 'sxt1.c' + st.seq, head, integrity: st.integrity, retractions: st.retractions || [] }));
+else console.log(JSON.stringify({ cursor: 'sxt1.c' + st.seq, head, integrity: st.integrity, retractions: st.retractions || [], ...(st.pending_count != null ? { pending_count: st.pending_count, pending_actor: st.pending_actor, pending: st.pending } : {}) }));
 `);
   const set = (o) => fs.writeFileSync(state, JSON.stringify(o));
   set({ seq: 5, integrity: { ok: true, events_checked: 5, blocks_checked: 3, problem: null }, retractions: [] });
@@ -88,6 +88,18 @@ test('integrity (stub): the pulse denies world-changing commands while it persis
     // the retractions parked while the store was corrupt are delivered now
     const all = [w.ctx(ok), w.ctx(w.post('after'))].join('\n');
     assert.match(all, /target: \[-a-\]\{\+b\+\}/);
+  } finally { w.sb.cleanup(); }
+});
+
+test('integrity (stub): an integrity failure blocks before (and instead of) the pending gate', () => {
+  const w = stubWorld();
+  try {
+    w.start(); w.post('a');
+    w.set({ seq: 9, integrity: BAD(9), retractions: [], pending_count: 2, pending_actor: 'local-agent', pending: [{ kind: 'supersession', change: 'superseded', severity: 'behavioral', seq: 8, doc_slug: 'runbook', old_text: 'a', new_text: 'b', resolve: 'recall it again' }] });
+    const d = w.pre('./bin/deploy --target b');
+    assert.equal(w.decision(d), 'deny');
+    assert.match(w.reason(d), /STORE INTEGRITY FAILURE at seq 9/);
+    assert.doesNotMatch(w.reason(d), /not re-read/);
   } finally { w.sb.cleanup(); }
 });
 

@@ -35,6 +35,11 @@ sessions with the same actor apart, adds a lease heartbeat, and stops the
 every tool call and checks them again right before a world-changing Bash
 command (`deploy`, `migrate`, `git push` …) — see
 [Retraction push and pulse](#retraction-push-and-pulse-kronicle-lite).
+**0.5.0** makes the pulse version-bound with kronicle-lite 0.8.0: a change
+blocks world-changing commands until the agent has re-read its current
+version (receiving it doesn't count), gives every subagent its own cursor,
+and warns when a Bash command changes files inside another session's
+sea-lite claim — see [Pending](#pending-kronicle-lite--080).
 
 ## Install
 
@@ -295,6 +300,8 @@ kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 |---|---|---|
 | `push` | auto | On when kronicle-lite is configured; `0` disables the push (the pulse follows unless set). |
 | `push_timeout` | `3` | Seconds per `kronicle-lite orient` call. |
+| `kronicle_actor` | auto | The agent's kronicle-lite actor for `pending` (see Pending). |
+| `push_reminder_after` | `15` | Tool calls a delivered change may stay pending before one reminder line; `0` never. |
 | `push_offline_after` | `20` | Consecutive unreadable calls before one "retraction feed offline" advisory; `0` never. |
 | `push_cosmetic` | off | Also list retractions kronicle-lite marks cosmetic. |
 | `pulse` | auto | `0` disables the pre-command check. |
@@ -302,6 +309,36 @@ kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 | `pulse_mode` | `deny` | `warn`: allow, add the retractions as context. |
 | `pulse_chain` | `split` | `check`: allow chained calls. |
 | `kronicle_data_dir` | auto | Store to read (see above). |
+
+#### Pending (kronicle-lite ≥ 0.8.0)
+
+Delivery is not reconciliation: a pushed change can be skimmed, compacted
+away or never acted on. kronicle-lite 0.8.0 tracks, per actor, every change
+to something that actor read which it has **not re-read at the current
+version** (`pending`). cc-anchor passes `--pending-actor <the agent's
+actor>` on every `orient`, and when the briefing carries `pending_count`
+the pulse gates on it:
+
+```
+cc-anchor pulse: did NOT run `./bin/deploy --target stg-a` — 1 kronicle-lite change(s) you (actor local-agent) relied on are not re-read at their current version:
+- runbook › Runbook › Deploy (seq 7, superseded/behavioral): read "Deploy to stg-a." → now "Deploy to stg-b."; diff: Deploy to [-stg-a.-]{+stg-b.+} — recall it again or read kronicle://docs/runbook
+Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change does not. …
+```
+
+- The gate is `pending_count > 0`; re-reading the current version clears it
+  with no manual step. Retrying the command, or having been pushed the
+  change, does not. An integrity failure still blocks first;
+  `pulse_mode: warn` still only warns.
+- The push never re-pushes a delivered change, but if it is still pending
+  `push_reminder_after` (15) tool calls later and no world-changing command
+  was attempted, it adds **one** reminder line.
+- The agent's actor: `kronicle_actor` / `CC_ANCHOR_KRONICLE_ACTOR`, else the
+  kronicle server's `--actor` (or `KRONICLE_LITE_ACTOR`) in `.mcp.json` /
+  `~/.claude.json`, else `local-agent` (the server's default). An agent that
+  passes its own `actor_id` to a kronicle-lite tool is gated on that actor's
+  reads — so a subagent with its own actor is checked on its own reads.
+- With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the pulse keeps
+  the 0.4.0 rule: deny while a retraction has not been delivered yet.
 
 **Subagents** have their own cursors: subagent tool events carry
 `agent_id`, a `SubagentStart` hook seeds the subagent's cursor from the main
@@ -469,7 +506,7 @@ Install (project scope — the file is meant to be committed; `--scope user`
 writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
 
 ```sh
-node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.4.0/scripts/anchor.mjs cursor install
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.5.0/scripts/anchor.mjs cursor install
 # or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
 ```
 
@@ -532,8 +569,8 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 ## Development
 
 ```sh
-npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 134 tests (files run one at a time: timing budgets)
+npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.7.0   # real CLIs for the contract tests
+npm test                    # node:test, 140 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

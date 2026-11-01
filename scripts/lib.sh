@@ -602,7 +602,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_FAILED=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -661,7 +661,8 @@ cc_kl_seed() {
 # cc_kl_forget — drop a stopped subagent's cursor files.
 cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
-  rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" 2>/dev/null || true
+  rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" \
+        "$CC_KL_B.actor" "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" 2>/dev/null || true
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
@@ -684,6 +685,35 @@ cc_kl_data_dir() {
   printf '%s' "${KRONICLE_LITE_DATA_DIR:-}"
 }
 
+# The actor whose reads count for kronicle-lite's `pending` (0.8.0): the
+# agent's MCP server actor. CC_ANCHOR_KRONICLE_ACTOR > config kronicle_actor
+# > the kronicle server's --actor / KRONICLE_LITE_ACTOR in .mcp.json or
+# ~/.claude.json > $KRONICLE_LITE_ACTOR > "local-agent" (the server default).
+cc_kl_actor_detect() {
+  local v f
+  v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+    [[ -s "$f" ]] || continue
+    v="$(jq -r --arg root "$CC_ROOT" '
+        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
+        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
+        | map(((.args // []) | index("--actor") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_ACTOR // empty)
+        | first // empty' "$f" 2>/dev/null)"
+    [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  done
+  printf '%s' "${KRONICLE_LITE_ACTOR:-local-agent}"
+}
+
+# The effective actor for THIS agent: one it named itself in a kronicle-lite
+# tool call (actor_id, learned by the PostToolUse hook) wins over the
+# session's server actor. Builtins only.
+cc_kl_agent_actor() {
+  local a=""
+  [[ -s "$CC_KL_B.actor" ]] && IFS= read -r a < "$CC_KL_B.actor"
+  printf '%s' "${a:-$CC_KL_ACTOR}"
+}
+
 # cc_kl_enabled — 0 when the push/pulse should run for this session (and
 # CC_KL_DD / CC_KL_BIN are set). Switch `push`: on | off | auto (default:
 # on when kronicle-lite is configured for the project). Resolved once per
@@ -693,7 +723,8 @@ cc_kl_enabled() {
   local sw; sw="$(cc_cfg_raw push)"
   case "$sw" in 0|false|no|off) return 1;; esac
   if [[ -s "$CC_KL_S.cfg" ]]; then
-    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; } < "$CC_KL_S.cfg"
+    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; IFS= read -r CC_KL_ACTOR; } < "$CC_KL_S.cfg"
+    [[ -n "$CC_KL_ACTOR" ]] || CC_KL_ACTOR="$(cc_kl_actor_detect)"
     [[ -n "$CC_KL_BIN" ]] && return 0
   fi
   [[ -e "$CC_KL_S.off" ]] && return 1
@@ -707,7 +738,8 @@ cc_kl_enabled() {
     cc_log_once kl_nobin "push: kronicle-lite is configured but its CLI was not found (PATH, plugin cache, CC_ANCHOR_KRONICLE_LITE_BIN); retraction push/pulse off"
     return 1; }
   CC_KL_DD="$(cc_kl_data_dir)"
-  printf '%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" > "$CC_KL_S.cfg" 2>/dev/null || return 1
+  CC_KL_ACTOR="$(cc_kl_actor_detect)"
+  printf '%s\n%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" "$CC_KL_ACTOR" > "$CC_KL_S.cfg" 2>/dev/null || return 1
   return 0
 }
 
@@ -715,7 +747,9 @@ cc_kl_enabled() {
 # bounded by push_timeout. Prints the JSON; non-zero on failure / timeout.
 cc_kl_orient() {
   local to; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
-  local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --cwd "$CC_ROOT")
+  # --pending-actor (kronicle-lite >= 0.8.0; older versions ignore it): the
+  # briefing then carries pending[] for the AGENT's reads, not the hook's.
+  local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --pending-actor "$(cc_kl_agent_actor)" --cwd "$CC_ROOT")
   [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
   if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null
   else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
@@ -763,6 +797,54 @@ cc_kl_integrity_from() {
   return 1
 }
 
+# cc_kl_pending_note <orient JSON> — record what kronicle-lite (>= 0.8.0)
+# says is still pending for this agent's actor:
+#   <S>.klcap / <S>.klnocap  this kronicle-lite reports `pending` / does not
+#   <B>.klpend               "count\x1fhidden\x1factor\x1fslugs" then one
+#                            "- …" line per item (at most 6)
+# Builtins + one jq. A briefing without pending_count (kronicle-lite <= 0.7.0)
+# switches the gate back to the retraction-since-last-look logic.
+cc_kl_pending_note() {
+  local r
+  r="$(jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
+    if (.pending_count | type) != "number" then "nocap" else
+      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
+      ((.pending // [])[0:6][] |
+        "- " + ([(.doc_slug // empty), ((.heading_path // []) | map(tostring) | join(" › ") | select(. != ""))] | join(" › "))
+        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")): read \"\(.old_text // "?" | clip(120))\" → "
+        + (if .current == null then "now REMOVED" else "now \"\(.new_text // "?" | clip(120))\"" end)
+        + (if .diff != null then "; diff: \(.diff | clip(200))" else "" end)
+        + (if (.derived_notes // []) | length > 0 then "; your notes derived from it: \((.derived_notes | map(if type == "object" then (.doc_slug // .slug // .block_id // "?") else tostring end) | join(", ")) | clip(120))" else "" end)
+        + (if .resolve != null then " — \(.resolve | clip(160))" else "" end)),
+      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // "?"))" else empty end)
+    end' <<<"$1" 2>/dev/null)" || return 0
+  if [[ "$r" == nocap ]]; then
+    [[ -e "$CC_KL_S.klcap" ]] && rm -f "$CC_KL_S.klcap" 2>/dev/null
+    [[ -e "$CC_KL_B.klpend" ]] && rm -f "$CC_KL_B.klpend" 2>/dev/null
+    [[ -e "$CC_KL_S.klnocap" ]] || : > "$CC_KL_S.klnocap"
+    return 0
+  fi
+  [[ -n "$r" ]] || return 0
+  [[ -e "$CC_KL_S.klcap" ]] || { : > "$CC_KL_S.klcap"; rm -f "$CC_KL_S.klnocap" 2>/dev/null; }
+  printf '%s\n' "$r" > "$CC_KL_B.klpend.$$" 2>/dev/null && mv -f "$CC_KL_B.klpend.$$" "$CC_KL_B.klpend"
+}
+
+# Pending count for this agent from the last briefing ("" = unknown).
+cc_kl_pending_count() {
+  [[ -s "$CC_KL_B.klpend" ]] || return 0
+  local l=""; IFS= read -r l < "$CC_KL_B.klpend"
+  l="${l%%$'\x1f'*}"
+  [[ "$l" =~ ^[0-9]+$ ]] && printf '%s' "$l"
+}
+
+# Force a fresh pending read (the pulse, when it has none for this agent).
+cc_kl_pending_refresh() {
+  local out rc
+  out="$(cc_kl_orient --focus pulse)"; rc=$?
+  (( rc == 0 )) && [[ -n "$out" ]] || return 1
+  cc_kl_pending_note "$out"
+}
+
 cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_KL_S.fail" 2>/dev/null || true
@@ -789,6 +871,7 @@ cc_kl_init() {
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
   IFS=$'\x1f' read -r cur seq < <(jq -r '[(.cursor // ""), ((.head.seq // "") | tostring)] | join("\u001f")' <<<"$out" 2>/dev/null)
   if [[ -z "$cur" ]]; then rm -f "$pre"; cc_kl_fail 2; return 1; fi
+  cc_kl_pending_note "$out"
   printf '%s\n' "$cur" > "$CC_KL_B.cursor" && printf '%s\n' "$seq" > "$CC_KL_B.seq" && mv -f "$pre" "$CC_KL_B.stamp"
   rm -f "$pre" "$CC_KL_S.fail" 2>/dev/null
   cc_kl_up
@@ -887,11 +970,13 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   seq="$(jq -r '.head.seq // empty' <<<"$out" 2>/dev/null)"
   if [[ -z "$seq" ]]; then rm -f "$pre"; cc_kl_fail 3; return 1; fi
   cc_kl_integrity_from "$out" || true
+  cc_kl_pending_note "$out"
   [[ -s "$CC_KL_B.seq" ]] && IFS= read -r stored < "$CC_KL_B.seq"
   if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up; return 1; fi
   IFS= read -r cur < "$CC_KL_B.cursor"
   out="$(cc_kl_orient --cursor "$cur" --focus retractions)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
+  cc_kl_pending_note "$out"
   local sc=0; cc_on push_cosmetic 0 && sc=1
   local parsed
   parsed="$(jq -r --arg show_cosmetic "$sc" -f "$CC_LIB_DIR/retractions.jq" <<<"$out" 2>/dev/null)" || { rm -f "$pre"; cc_kl_fail 3; return 1; }
@@ -943,6 +1028,7 @@ cc_kl_integrity_recheck() {
   local -a c=(); [[ -n "$cur" ]] && c=(--cursor "$cur")
   out="$(cc_kl_orient ${c[@]+"${c[@]}"} --focus retractions)"; rc=$?
   (( rc == 0 )) && [[ -n "$out" ]] || return 0
+  cc_kl_pending_note "$out"
   cc_kl_integrity_from "$out" && return 0
   [[ -e "$CC_KL_S.integrity" ]] && return 0
   # Repaired: forget the head we parked at, so the next fetch re-reads the
@@ -960,6 +1046,12 @@ cc_kl_push() {
   cc_kl_session "$sid" "$(cc_payload_agent "$payload")"
   [[ -e "$CC_KL_S.off" ]] && return 0
   cc_kl_enabled || return 0
+  # The agent named its own kronicle-lite actor in a tool call: its pending
+  # list is that actor's (per agent: a subagent may use its own actor_id).
+  if [[ "$payload" =~ \"tool_name\":[[:space:]]*\"mcp__[^\"]*kronicle[^\"]*\" && "$payload" == *'"actor_id"'* ]]; then
+    local na; na="$(jq -r '.tool_input.actor_id // empty | tostring' <<<"$payload" 2>/dev/null)"
+    if [[ -n "$na" && "$na" != "$(cc_kl_agent_actor)" ]]; then printf '%s\n' "$na" > "$CC_KL_B.actor" 2>/dev/null; rm -f "$CC_KL_B.klpend" "$CC_KL_B.stamp" 2>/dev/null; fi
+  fi
   # The agent got a tool call in since the last push: what it was told is no
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
@@ -983,6 +1075,27 @@ cc_kl_push() {
     warn="${warn:+$warn
 
 }cc-anchor: the kronicle-lite retraction feed has been offline for ${n} consecutive tool calls (the CLI is missing, failing or timing out; see .claude/cc-anchor/log). Changes to runbooks and notes are NOT being pushed to you right now: re-read the source (get_system_state with your cursor, recall) yourself before any world-changing command."
+  fi
+  # Delivered is not reconciled (kronicle-lite >= 0.8.0 `pending`): a change
+  # the agent still has not re-read push_reminder_after (15) tool calls after
+  # it became pending, with no world-changing command attempted meanwhile
+  # (the pulse would have shown it), gets ONE reminder line.
+  local pc; pc="$(cc_kl_pending_count)"
+  if [[ "$pc" =~ ^[0-9]+$ ]] && (( pc > 0 )); then
+    local k=0 ra; [[ -s "$CC_KL_B.pendcalls" ]] && IFS= read -r k < "$CC_KL_B.pendcalls"
+    [[ "$k" =~ ^[0-9]+$ ]] || k=0; k=$((k + 1)); printf '%s\n' "$k" > "$CC_KL_B.pendcalls"
+    ra="$(cc_cfg_raw push_reminder_after)"; [[ "$ra" =~ ^[0-9]+$ ]] || ra=15
+    if (( ra > 0 && k >= ra )) && [[ ! -e "$CC_KL_B.reminded" && ! -e "$CC_KL_B.wcattempt" ]]; then
+      : > "$CC_KL_B.reminded"
+      local head="" slugs="" act=""; IFS= read -r head < "$CC_KL_B.klpend"
+      IFS=$'\x1f' read -r _ _ act slugs <<<"$head"
+      cc_log "push: pending reminder (${pc} item(s), actor ${act}) after ${k} tool calls"
+      warn="${warn:+$warn
+
+}cc-anchor: reminder — ${pc} kronicle-lite change(s) you relied on are still not re-read at their current version (${slugs:-see kronicle-lite pending --actor ${act}}). Receiving them earlier does not count: re-read (recall, or kronicle://docs/<slug>) before acting on them."
+    fi
+  elif [[ -e "$CC_KL_B.pendcalls" || -e "$CC_KL_B.reminded" || -e "$CC_KL_B.wcattempt" ]]; then
+    rm -f "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" 2>/dev/null
   fi
   if (( KL_SHOWN == 0 )); then CC_KL_CONTEXT="$warn"; return 0; fi
   CC_KL_CONTEXT="${warn:+$warn

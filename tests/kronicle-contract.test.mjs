@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { ROOT, sandbox, hook } from './helpers.mjs';
@@ -21,6 +22,9 @@ const CANDIDATES = [process.env.KRONICLE_LITE_CLI, path.join(ROOT, 'node_modules
 const KL = CANDIDATES.find((f) => f && fs.existsSync(f));
 const SKIP = process.env.CC_ANCHOR_SKIP_KRONICLE_CONTRACT === '1' ? 'CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1' : false;
 const opts = { skip: SKIP || (!KL && 'kronicle-lite CLI not found (see the first test)') };
+// kronicle-lite >= 0.8.0 reports per-actor `pending` (version-bound reconciliation);
+// the pulse then gates on it instead of "retraction since the last look".
+const CAP = !!KL && spawnSync('node', [KL, 'pending', '--actor', 'probe', '--json', '--data-dir', fs.mkdtempSync(path.join(os.tmpdir(), 'klcap-'))], { encoding: 'utf8' }).status === 0;
 
 test('the real kronicle-lite CLI (>= 0.5.0) is available for the contract tests', { skip: SKIP }, () => {
   assert.ok(KL, `kronicle-lite CLI not found; tried ${CANDIDATES.filter(Boolean).join(', ')}. Run \`npm i --no-save kronicle-lite@0.6.0\`, set KRONICLE_LITE_CLI, or CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1 to skip.`);
@@ -41,6 +45,11 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
     assert.equal(r.status, 0, r.stderr);
   };
   put(RB('staging-a'));
+  // The agent reads the runbook through its MCP server (actor "local-agent", the
+  // server default): with kronicle-lite >= 0.8.0 that is what makes a later
+  // change pending for it. Older versions have no `get`; ignored there.
+  const read = (actor = 'local-agent', slug = 'runbook') => spawnSync('node', [KL, 'get', slug, '--actor', actor, '--data-dir', data], { encoding: 'utf8', cwd: sb.proj });
+  if (CAP) read();
   const base = { CC_ANCHOR_KRONICLE_LITE_BIN: KL, ...extraEnv };
   if (mcpJson) {
     fs.writeFileSync(path.join(sb.proj, '.mcp.json'), JSON.stringify({ mcpServers: { 'kronicle-lite': { command: 'npx', args: ['-y', 'kronicle-lite@0.6.0', 'serve', '--data-dir', data] } } }));
@@ -56,7 +65,7 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
   const decision = (r) => r.json?.hookSpecificOutput?.permissionDecision ?? null;
   const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason ?? '';
   const log = () => (fs.existsSync(path.join(sb.run, 'log')) ? fs.readFileSync(path.join(sb.run, 'log'), 'utf8') : '');
-  return { sb, data, put, start, post, pre, spawn, stopAgent, ctx, decision, reason, log };
+  return { sb, data, put, read, start, post, pre, spawn, stopAgent, ctx, decision, reason, log };
 }
 
 test('push (real CLI): a retraction that lands during a tool call is injected after it — relied on / now / diff — exactly once', opts, () => {
@@ -113,13 +122,23 @@ test('pulse (real CLI): a world-changing command issued straight after the push 
     assert.equal(w.decision(d), 'deny');
     assert.match(w.reason(d), /did NOT run `\.\/bin\/deploy --target staging-a`/);
     assert.match(w.reason(d), /\[-staging-a\.-\]\{\+staging-b\.\+\}/);
-    assert.match(w.reason(d), /Re-read the affected document/);
-    assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'the deny delivered it: re-running is allowed');
+    assert.match(w.reason(d), /Re-read/);
+    if (CAP) {
+      assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'pending: being told is not reconciling');
+      w.read();
+      assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'pending: re-reading the current version clears it');
+    } else {
+      assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'the deny delivered it: re-running is allowed');
+    }
     // the read-in-between path
     w.put(RB('staging-c'));
     assert.ok(w.ctx(w.post('./bin/migrate-check')));
     w.post('cat runbook.md');
-    assert.equal(w.pre('./bin/deploy --target staging-c').stdout, '', 'a tool call in between = the agent had its turn');
+    if (CAP) {
+      assert.equal(w.decision(w.pre('./bin/deploy --target staging-c')), 'deny', 'pending: a tool call is not a re-read');
+      w.read();
+    }
+    assert.equal(w.pre('./bin/deploy --target staging-c').stdout, '', 'a tool call in between (legacy) / a re-read (pending) = allowed');
     assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'non-world-changing commands are never checked');
   } finally { w.sb.cleanup(); }
 });
@@ -134,6 +153,7 @@ test('pulse (real CLI): a change that lands after the last tool call is caught b
     assert.equal(w.decision(d), 'deny');
     assert.match(w.reason(d), /staging-a\.-\]\{\+prod-b/);
     assert.equal(w.ctx(w.post('cat runbook')), null, 'the deny advanced the cursor: no duplicate push');
+    if (CAP) { assert.equal(w.decision(w.pre('./bin/deploy --target prod-b')), 'deny'); w.read(); }
     assert.equal(w.pre('./bin/deploy --target prod-b').stdout, '');
   } finally { w.sb.cleanup(); }
 });
