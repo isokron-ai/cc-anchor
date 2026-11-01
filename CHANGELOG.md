@@ -4,7 +4,7 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
-## [Unreleased]
+## [0.4.0] — 2026-11-01
 
 The one strong live-agent result from agent-memory-bench Track B, shipped:
 T1 (the runbook changes mid-session) went 0/36 for every pull setup and
