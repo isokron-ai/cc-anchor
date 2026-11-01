@@ -2,9 +2,9 @@
 
 **A Claude Code plugin whose anchor card survives context compaction.**
 
-After a compaction Claude Code re-reads a summary and quietly forgets the
-invariants that were at the top of the conversation: the goal, the "never do
-X" rules, the files it was in the middle of. cc-anchor keeps a ≤ 25-line
+Claude Code reloads CLAUDE.md after a compaction, but what you settled *in the
+conversation* only survives as a summary: the session goal, the "never do X"
+rules you added along the way, the files it was in the middle of. cc-anchor keeps a ≤ 25-line
 **anchor card** on disk, refreshes its breadcrumbs on every tool call, writes
 it out on `PreCompact`, and re-injects it **verbatim, at the top of the fresh
 context** on `SessionStart(compact)` — with a reconciliation discipline that
