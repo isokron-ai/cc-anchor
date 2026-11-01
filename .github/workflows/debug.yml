@@ -24,6 +24,7 @@ jobs:
           tail -60 $W/ss.err
           ls -la $P/.claude/cc-anchor/push/ || true
           node $KL put runbook $W/r2.md --data-dir $W/kl
-          echo '{"session_id":"sess-dbg-01","cwd":"'$P'","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"},"tool_response":{}}' | bash -x scripts/post-tool-use.sh 2>$W/pt.err; echo "pt rc=$?"
-          grep -n "cc_kl\|orient\|kronicle" $W/pt.err | tail -80
+          echo '{"session_id":"sess-dbg-01","cwd":"'$P'","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"},"tool_response":{}}' | bash -x scripts/post-tool-use.sh 2>$W/pt.err > $W/pt.out; echo "pt rc=$?"; echo "STDOUT:"; cat $W/pt.out
+          echo "---- full post trace (long JSON lines cut) ----"
+          grep -n "" $W/pt.err | sed -n '/cc_kl_pending_note/,$p' | cut -c1-220 | grep -v '^[0-9]*:  ' | tail -150
           cat $P/.claude/cc-anchor/log || true
