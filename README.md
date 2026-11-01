@@ -570,7 +570,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.7.0   # real CLIs for the contract tests
-npm test                    # node:test, 140 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 142 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

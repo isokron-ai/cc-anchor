@@ -68,6 +68,14 @@ pending gate switches on when kronicle-lite reports `pending`).
   still no process.
 
 ### Fixed
+- **macOS: no retractions at all with kronicle-lite 0.7.0 when the project
+  path goes through a symlink** (`/var` → `/private/var`, a symlinked
+  checkout). kronicle-lite 0.7.0 scopes retractions by a project key derived
+  from the working directory; a `put` records `process.cwd()` (physical),
+  the hook passed `$CLAUDE_PROJECT_DIR` literally, so the keys differed and
+  every retraction was hidden. `orient` now gets the physical path
+  (`pwd -P`). The Bash guard likewise rewrites sea-lite's physical project
+  paths to the hook's spelling of the root.
 - **Empty card at startup.** `InstructionsLoaded` renders the template card
   ("Project: (unset …)", "Goal: (unset …)", "- (none …)") before
   `SessionStart` runs, so every new session got that empty card injected.

@@ -749,7 +749,13 @@ cc_kl_orient() {
   local to; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
   # --pending-actor (kronicle-lite >= 0.8.0; older versions ignore it): the
   # briefing then carries pending[] for the AGENT's reads, not the hook's.
-  local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --pending-actor "$(cc_kl_agent_actor)" --cwd "$CC_ROOT")
+  # --cwd as a PHYSICAL path: kronicle-lite (>= 0.7.0) scopes documents by a
+  # project key derived from the working directory, and a `put` from the MCP
+  # server or the CLI records process.cwd(), which resolves symlinks (macOS:
+  # /var -> /private/var). A literal $CLAUDE_PROJECT_DIR through a symlink
+  # would name a different project and hide every retraction.
+  local pcwd; pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
+  local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --pending-actor "$(cc_kl_agent_actor)" --cwd "${pcwd:-$CC_ROOT}")
   [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
   if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null
   else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
@@ -1205,8 +1211,12 @@ cc_bg_refresh() {
     cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); not checking until the next refresh"
     return 1
   fi
-  jq -r '.tickets[]? | select(.claim != null) | . as $t | .claim as $c
-    | ($t.project // "") as $p
+  # sea-lite reports the project by its physical path (macOS: /private/var/…
+  # for /var/…); rewrite it to this hook's spelling of the root so finds and
+  # messages use the paths the agent sees.
+  local phys; phys="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
+  jq -r --arg root "$CC_ROOT" --arg phys "${phys:-$CC_ROOT}" '.tickets[]? | select(.claim != null) | . as $t | .claim as $c
+    | ($t.project // "" | if $phys != $root and (. == $phys or startswith($phys + "/")) then $root + .[($phys | length):] else . end) as $p
     | ($c.scope // [])[]
     | sub("[*?\\[].*$"; "") | sub("/+$"; "")
     | [($c.session // ""), (if startswith("/") then . elif . == "" then $p else $p + "/" + . end),

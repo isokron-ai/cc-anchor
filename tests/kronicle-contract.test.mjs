@@ -50,7 +50,9 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
   // change pending for it. Older versions have no `get`; ignored there.
   const read = (actor = 'local-agent', slug = 'runbook') => spawnSync('node', [KL, 'get', slug, '--actor', actor, '--data-dir', data], { encoding: 'utf8', cwd: sb.proj });
   if (CAP) read();
-  const base = { CC_ANCHOR_KRONICLE_LITE_BIN: KL, ...extraEnv };
+  // Generous CLI timeout: a loaded runner can take seconds to start node +
+  // sqlite; the timeout path itself is covered in push.test.mjs.
+  const base = { CC_ANCHOR_KRONICLE_LITE_BIN: KL, CC_ANCHOR_PUSH_TIMEOUT: '30', ...extraEnv };
   if (mcpJson) {
     fs.writeFileSync(path.join(sb.proj, '.mcp.json'), JSON.stringify({ mcpServers: { 'kronicle-lite': { command: 'npx', args: ['-y', 'kronicle-lite@0.6.0', 'serve', '--data-dir', data] } } }));
   } else {
@@ -340,5 +342,19 @@ test('per-subagent cursors (real CLI): ids that share a long prefix, or are long
     const files = fs.readdirSync(path.join(w.sb.run, 'push')).filter((f) => /\.a-.*\.cursor$/.test(f));
     assert.equal(files.length, 4, files.join(', '));
     assert.ok(files.includes('sesskl00.a-agent-0123456789abcdefX.cursor'), 'a filename-safe id is kept whole');
+  } finally { w.sb.cleanup(); }
+});
+
+test('push (real CLI): a project reached through a symlink (macOS /var → /private/var) still gets its retractions (physical --cwd)', opts, () => {
+  const w = world();
+  try {
+    const link = path.join(w.sb.base, 'proj-link');
+    fs.symlinkSync(w.sb.proj, link);
+    const env = { ...w.sb.env, CLAUDE_PROJECT_DIR: link };
+    const base = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: KL, CC_ANCHOR_KRONICLE_DATA_DIR: w.data, CC_ANCHOR_PUSH_TIMEOUT: '30' };
+    hook('session-start.sh', { session_id: 'sess-link-01', cwd: link, hook_event_name: 'SessionStart', source: 'startup' }, env, base);
+    w.put(RB('staging-l')); // the CLI's process.cwd() is the physical path, like the MCP server's
+    const r = hook('post-tool-use.sh', { session_id: 'sess-link-01', cwd: link, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'build' }, tool_response: {} }, env, base);
+    assert.match(w.ctx(r) || '', /staging-l/);
   } finally { w.sb.cleanup(); }
 });

@@ -31,7 +31,7 @@ function world(extraEnv = {}) {
   const read = (actor = 'local-agent') => assert.equal(kl('get', 'runbook', '--actor', actor).status, 0);
   put(RB('staging-a'));
   read();
-  const base = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: KL, CC_ANCHOR_KRONICLE_DATA_DIR: data, ...extraEnv };
+  const base = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: KL, CC_ANCHOR_KRONICLE_DATA_DIR: data, CC_ANCHOR_PUSH_TIMEOUT: '30', ...extraEnv };
   const ag = (agent) => (agent ? { agent_id: agent, agent_type: 'general-purpose' } : {});
   const start = () => hook('session-start.sh', { session_id: SID, cwd: sb.proj, hook_event_name: 'SessionStart', source: 'startup' }, sb.env, base);
   const post = (command = 'make', agent = null, extra = {}) => hook('post-tool-use.sh', { session_id: SID, cwd: sb.proj, hook_event_name: 'PostToolUse', ...ag(agent), tool_name: 'Bash', tool_input: { command }, tool_response: {} }, sb.env, { ...base, ...extra });
@@ -126,7 +126,7 @@ test('pending detection: the agent actor comes from the kronicle server in .mcp.
   const w = world();
   try {
     fs.writeFileSync(path.join(w.sb.proj, '.mcp.json'), JSON.stringify({ mcpServers: { 'kronicle-lite': { command: 'node', args: [KL, 'serve', '--data-dir', w.data, '--actor', 'agent-x'] } } }));
-    const env = { CC_ANCHOR_KRONICLE: '', CC_ANCHOR_KRONICLE_DATA_DIR: '' };
+    const env = { CC_ANCHOR_KRONICLE: '', CC_ANCHOR_KRONICLE_DATA_DIR: '', CC_ANCHOR_PUSH_TIMEOUT: '30' };
     w.read('agent-x');
     hook('session-start.sh', { session_id: 'sess-mcp-0001', cwd: w.sb.proj, hook_event_name: 'SessionStart', source: 'startup' }, w.sb.env, { CC_ANCHOR_KRONICLE_LITE_BIN: KL, ...env });
     w.put(RB('staging-z'));

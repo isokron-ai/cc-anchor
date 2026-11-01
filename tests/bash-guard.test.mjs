@@ -34,7 +34,9 @@ function world({ env: extra = {} } = {}) {
   const id = JSON.parse(sea(['create', 'Add rate limiting to login', '--triaged', '--json']).stdout).ticket.id;
   const c = sea(['claim', id, '--paths', 'src/auth', '--lease', '900', '--actor', 'claude', '--session', 'sess-A']);
   assert.equal(c.status, 0, c.stderr);
-  const base = { CC_ANCHOR_SEA_LITE_BIN: SEA_CLI, CC_ANCHOR_SEA: '1', CC_ANCHOR_KRONICLE: '0', ...extra };
+  // A loaded runner can take seconds to start node + sqlite: don't let the
+  // board call's 4 s default timeout decide the outcome.
+  const base = { CC_ANCHOR_SEA_LITE_BIN: SEA_CLI, CC_ANCHOR_SEA: '1', CC_ANCHOR_KRONICLE: '0', CC_ANCHOR_SCOPE_TIMEOUT: '30', ...extra };
   let n = 0;
   /** One Bash tool call: PreToolUse (pulse.sh stamps it), `work` runs, PostToolUse checks. */
   const bash = (sid, work, { tid = `toolu_${++n}`, envx = {} } = {}) => {
@@ -202,4 +204,19 @@ test('bash guard fails open: a broken sea-lite prints nothing, logs once; bash_g
     assert.equal(hook('post-tool-use.sh', { ...p, hook_event_name: 'PostToolUse', tool_response: {} }, sb.env).stdout, '');
     assert.ok(fs.existsSync(path.join(sb.run, 'bashguard', 's1.off')), 'no claims, no sea-lite: latched off for the session');
   } finally { sb.cleanup(); }
+});
+
+test('bash guard (real CLI): a project root reached through a symlink (macOS /var → /private/var) is reported in the hook’s own spelling', opts, () => {
+  const w = world();
+  try {
+    const link = path.join(w.sb.base, 'via-link');
+    fs.symlinkSync(w.sb.proj, link);
+    const env = { ...w.env, CLAUDE_PROJECT_DIR: link };
+    const p = { session_id: 'sess-B', cwd: link, tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 'toolu_link1' };
+    hook('pulse.sh', { ...p, hook_event_name: 'PreToolUse' }, env, w.base);
+    sleep(0.02);
+    fs.appendFileSync(w.f('src', 'auth', 'login.ts'), 'l\n');
+    const r = hook('post-tool-use.sh', { ...p, hook_event_name: 'PostToolUse', tool_response: {} }, env, w.base);
+    assert.match(w.ctx(r), /^- src\/auth\/login\.ts — held by claude#sessA, ticket [0-9a-f]{8} "Add rate limiting to login" \(locks src\/auth;/m, `stdout=${r.stdout} stderr=${r.stderr} log=${fs.existsSync(path.join(w.sb.run, 'log')) ? fs.readFileSync(path.join(w.sb.run, 'log'), 'utf8') : ''}`);
+  } finally { w.sb.cleanup(); }
 });
