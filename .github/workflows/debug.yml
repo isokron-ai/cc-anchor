@@ -1,0 +1,29 @@
+name: debug-macos
+on:
+  pull_request:
+jobs:
+  macos-debug:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: brew install jq
+      - run: npm install --no-save --no-package-lock kronicle-lite@0.7.0 sea-lite@^0.4.0
+      - name: Trace one push against kronicle-lite 0.7.0
+        run: |
+          set -x
+          KL=$PWD/node_modules/kronicle-lite/dist/cli.js
+          W=$(mktemp -d); P=$W/proj; mkdir -p $P/.git $W/home
+          printf '# R\n\n## D\n\nDeploy to a.\n' > $W/r1.md; printf '# R\n\n## D\n\nDeploy to b.\n' > $W/r2.md
+          node $KL put runbook $W/r1.md --data-dir $W/kl
+          node $KL orient --json --actor cc-anchor-x --pending-actor local-agent --cwd $P --data-dir $W/kl --focus pulse | head -c 400; echo " rc=$?"
+          export HOME=$W/home CLAUDE_PROJECT_DIR=$P CC_ANCHOR_KRONICLE=1 CC_ANCHOR_KRONICLE_LITE_BIN=$KL CC_ANCHOR_KRONICLE_DATA_DIR=$W/kl
+          echo '{"session_id":"sess-dbg-01","cwd":"'$P'","hook_event_name":"SessionStart","source":"startup"}' | bash -x scripts/session-start.sh 2>$W/ss.err; echo "ss rc=$?"
+          tail -60 $W/ss.err
+          ls -la $P/.claude/cc-anchor/push/ || true
+          node $KL put runbook $W/r2.md --data-dir $W/kl
+          echo '{"session_id":"sess-dbg-01","cwd":"'$P'","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"},"tool_response":{}}' | bash -x scripts/post-tool-use.sh 2>$W/pt.err; echo "pt rc=$?"
+          grep -n "cc_kl\|orient\|kronicle" $W/pt.err | tail -80
+          cat $P/.claude/cc-anchor/log || true
