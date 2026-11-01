@@ -113,7 +113,12 @@ test('PostToolUse: empty stdin, non-JSON stdin and missing jq all fail open (exi
   } finally { sb.cleanup(); }
 });
 
-test('PostToolUse: cold hook run takes less than 50 ms wall (budget 20 ms on a dev box)', () => {
+// Wall-clock budgets depend on the runner's load (2-core boxes, macOS CI):
+// opt-in with CC_ANCHOR_PERF_TESTS=1 (CI runs them in a separate,
+// non-blocking step); behaviour is covered by the deterministic tests.
+const PERF = process.env.CC_ANCHOR_PERF_TESTS === '1' ? {} : { skip: 'wall-clock budget: set CC_ANCHOR_PERF_TESTS=1' };
+
+test('PostToolUse: cold hook run takes less than 50 ms wall (budget 20 ms on a dev box)', PERF, () => {
   const sb = sandbox();
   try {
     postTool(sb.env, 'Read', { file_path: 'warm' });
@@ -526,7 +531,7 @@ test('claims: an error result (isError / {error}) changes nothing; non-sea tools
   } finally { sb.cleanup(); }
 });
 
-test('claims: PostToolUse hot path stays under budget with the claims branch present (non-sea tool)', () => {
+test('claims: PostToolUse hot path stays under budget with the claims branch present (non-sea tool)', PERF, () => {
   const sb = sandbox();
   try {
     postTool(sb.env, 'Read', { file_path: 'warm' });
@@ -758,7 +763,7 @@ test('PreToolUse scope guard fails open: no binary, unsupported subcommand (exit
   } finally { sb.cleanup(); }
 });
 
-test('PreToolUse scope guard: cached verdict path is fast (< 30 ms median) and the off path is faster', () => {
+test('PreToolUse scope guard: cached verdict path is fast (< 30 ms median) and the off path is faster', PERF, () => {
   const sb = sandbox();
   try {
     const bin = fakeCli(sb, 'sea-lite', 'exit 0');

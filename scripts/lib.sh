@@ -607,6 +607,9 @@ KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
   local __t
+  # Tests drive the clock explicitly (second-boundary logic) instead of
+  # depending on wall-clock luck.
+  if [[ "${CC_ANCHOR_TEST_NOW:-}" =~ ^[0-9]+$ ]]; then printf -v "$1" '%s' "$CC_ANCHOR_TEST_NOW"; return 0; fi
   printf -v __t '%(%s)T' -1 2>/dev/null || __t=""
   [[ "$__t" =~ ^[0-9]+$ ]] || __t="$(date +%s)"
   printf -v "$1" '%s' "$__t"

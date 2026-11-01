@@ -21,6 +21,9 @@ jobs:
         run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0
       - name: Test
         run: npm test
+      - name: Wall-clock budget tests (informational, non-blocking)
+        continue-on-error: true
+        run: CC_ANCHOR_PERF_TESTS=1 node --test --test-name-pattern="less than 50 ms|stays under budget|cached verdict path is fast" tests/hooks.test.mjs
       - name: Hook hot-path timing
         run: |
           mkdir -p /tmp/proj/.git
