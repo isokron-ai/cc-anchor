@@ -9,7 +9,9 @@
 #   line 1  full cursor to persist ("" when the result has none)
 #   line 2  head seq
 #   line 3  "<shown> <blocking> <cosmetic>" counts
-#   line 4… one "- …" line per shown retraction (at most 6, then "- … and N more")
+#   line 4  "ok", or "fail\x1f<seq>\x1f<problem>" when the briefing reports
+#           integrity.ok === false (a corrupt or tampered store)
+#   line 5… one "- …" line per shown retraction (at most 6, then "- … and N more")
 #
 # Cosmetic vs semantic: kronicle-lite may mark a retraction cosmetic
 # (`cosmetic: true`, `change_class|materiality|class: "cosmetic"`, or
@@ -39,5 +41,8 @@ def line:
 | (if $show_cosmetic == "1" then $all else $sem end) as $shown
 | (.cursor // ""), ((.head.seq // "") | tostring),
   "\($shown | length) \($all | map(select(blocking)) | length) \($cos | length)",
+  (if (.integrity | type) == "object" and .integrity.ok == false
+   then "fail\u001f\(.integrity.seq // .integrity.at_seq // .integrity.first_bad_seq // "?")\u001f\(.integrity.problem // .integrity.error // "integrity check failed" | clip(240))"
+   else "ok" end),
   ($shown[0:6][] | line),
   (if ($shown | length) > 6 then "- … and \(($shown | length) - 6) more (get_system_state with your cursor lists them all)" else empty end)

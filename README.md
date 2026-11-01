@@ -262,7 +262,12 @@ only if the head moved, one `orient --focus retractions`: ~0.5–1 s on a
 laptop, once per change. Every CLI call is bounded by `push_timeout` (3 s);
 a missing CLI, a timeout, a crash or unparsable output **fails open** — the
 tool call runs, nothing is printed, one line goes to the log, and the CLI is
-not retried for 60 s. The store is the one the kronicle MCP server uses:
+not retried for 60 s. If that lasts `push_offline_after` (20) consecutive
+calls, the agent gets one advisory that the retraction feed is offline.
+A store that answers but reports `integrity.ok: false` (corrupt or tampered
+chain) is the opposite case: the push warns once per distinct problem, no
+retractions are taken from it, and the pulse denies world-changing commands
+until a fresh read says the store is ok. The store is the one the kronicle MCP server uses:
 `kronicle_data_dir` / `CC_ANCHOR_KRONICLE_DATA_DIR`, else the server's
 `--data-dir` (or `KRONICLE_LITE_DATA_DIR` env) in `.mcp.json` /
 `~/.claude.json`, else `$KRONICLE_LITE_DATA_DIR`, else `~/.kronicle-lite`.
@@ -275,6 +280,7 @@ kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 |---|---|---|
 | `push` | auto | On when kronicle-lite is configured; `0` disables the push (the pulse follows unless set). |
 | `push_timeout` | `3` | Seconds per `kronicle-lite orient` call. |
+| `push_offline_after` | `20` | Consecutive unreadable calls before one "retraction feed offline" advisory; `0` never. |
 | `push_cosmetic` | off | Also list retractions kronicle-lite marks cosmetic. |
 | `pulse` | auto | `0` disables the pre-command check. |
 | `pulse_match` | `deploy\|migrate\|publish\|release\|git push\|terraform apply\|kubectl apply` | Which commands change the world. |
@@ -500,7 +506,7 @@ files instead of guessing.
 | `CC_ANCHOR_STOP_WARN` | `1` | `0` disables the Stop-hook nudge |
 | `CC_ANCHOR_COLOR` | `1` | `0` disables ANSI colour in the status line |
 | `CC_ANCHOR_SEA` | auto | `1`/`0` forces sea-lite detection |
-| `CC_ANCHOR_CLAIM_GUARD`, `…_SESSION_DOC`, `…_SUBAGENT_RELEASE`, `…_TASK_MIRROR`, `…_TASK_MIRROR_GATE`, `…_SCOPE_GUARD`, `…_SCOPE_TTL`, `…_SCOPE_TIMEOUT`, `…_HEARTBEAT`, `…_HEARTBEAT_INTERVAL`, `…_SEA_SESSION`, `…_SEA_ACTOR`, `…_PUSH`, `…_PUSH_TIMEOUT`, `…_PUSH_COSMETIC`, `…_PULSE`, `…_PULSE_MATCH`, `…_PULSE_MODE`, `…_PULSE_CHAIN` | see the pack / push tables | Environment form of the `cc-anchor.json` switches |
+| `CC_ANCHOR_CLAIM_GUARD`, `…_SESSION_DOC`, `…_SUBAGENT_RELEASE`, `…_TASK_MIRROR`, `…_TASK_MIRROR_GATE`, `…_SCOPE_GUARD`, `…_SCOPE_TTL`, `…_SCOPE_TIMEOUT`, `…_HEARTBEAT`, `…_HEARTBEAT_INTERVAL`, `…_SEA_SESSION`, `…_SEA_ACTOR`, `…_PUSH`, `…_PUSH_TIMEOUT`, `…_PUSH_COSMETIC`, `…_PUSH_OFFLINE_AFTER`, `…_PULSE`, `…_PULSE_MATCH`, `…_PULSE_MODE`, `…_PULSE_CHAIN` | see the pack / push tables | Environment form of the `cc-anchor.json` switches |
 | `CC_ANCHOR_KRONICLE_LITE_BIN`, `CC_ANCHOR_SEA_LITE_BIN` | auto | Path to the CLI (binary or `dist/cli.js`) |
 | `CC_ANCHOR_KRONICLE_DATA_DIR` | — | `--data-dir` for `kronicle-lite put` and the retraction push (default: detected from the kronicle MCP server, else `~/.kronicle-lite`) |
 | `CC_ANCHOR_SEA_MODULE`, `CC_ANCHOR_SEA_DATA_DIR` | auto | sea-lite package path / data dir for the task mirror, the scope guard and the heartbeat (`--data-dir`; `KRONICLE_LITE_DATA_DIR` is honoured too) |
@@ -512,7 +518,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 116 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 123 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```
