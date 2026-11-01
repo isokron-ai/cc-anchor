@@ -235,21 +235,24 @@ test('push/pulse (real CLI): an exact mtime tie (1-s filesystem, one kernel tick
     const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0);
     const stamp = path.join(w.sb.run, 'push', 'sesskl00.stamp');
     const db = path.join(w.data, 'kronicle-lite.db');
-    const tie = (stampSecondsAgo) => {
-      const t = Math.floor(Date.now() / 1000) - 5;
+    // The clock is driven explicitly (CC_ANCHOR_TEST_NOW), so no assertion
+    // depends on where a real second boundary falls.
+    const NOW = Math.floor(Date.now() / 1000); // pinned: the hooks see this second throughout
+    const tie = (stampSecond) => {
+      const t = NOW - 5;
+      fs.writeFileSync(stamp, `${stampSecond}\n`);
       fs.utimesSync(db, t, t); fs.utimesSync(stamp, t, t); // identical at every precision
-      fs.writeFileSync(stamp, `${Math.floor(Date.now() / 1000) - stampSecondsAgo}\n`);
-      fs.utimesSync(stamp, t, t);
     };
-    tie(0);
-    w.post('same second as our read');
-    assert.equal(n(), 0, 'push: tie inside the stamp\'s second → no spawn');
-    w.pre('./bin/deploy --target staging-a');
+    const at = { CC_ANCHOR_TEST_NOW: String(NOW) };
+    tie(NOW);
+    w.post('same second as our read', undefined, at);
+    assert.equal(n(), 0, 'push: tie, clock still inside the stamp\'s second → no spawn');
+    w.pre('./bin/deploy --target staging-a', undefined, at);
     assert.equal(n(), 1, 'pulse: a tie always re-reads (one read-only pulse)');
-    tie(3);
-    w.post('a later second');
+    tie(NOW - 3);
+    w.post('a later second', undefined, at);
     assert.equal(n(), 2, 'push: tie from an earlier second → one re-read…');
-    w.post('again');
-    assert.equal(n(), 2, '…which stamps a later second: settled');
+    w.post('again', undefined, at);
+    assert.equal(n(), 2, '…which stamps a newer mtime than the store: settled');
   } finally { w.sb.cleanup(); }
 });

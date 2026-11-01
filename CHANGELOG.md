@@ -4,6 +4,17 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [Unreleased]
+
+### Changed
+- Tests: no assertion depends on wall-clock luck any more. The exact-tie
+  test drives the clock with a test-only `CC_ANCHOR_TEST_NOW` (epoch
+  seconds) instead of hoping no second boundary falls inside it (failed
+  once on macOS CI: expected 0 spawns, got 1). The three wall-clock budget
+  tests (PostToolUse < 50 ms, scope guard cached < 30 ms) are opt-in with
+  `CC_ANCHOR_PERF_TESTS=1`; CI runs them in a separate non-blocking step
+  and still prints the hook timings.
+
 ## [0.4.0] — 2026-11-01
 
 ### Fixed
