@@ -5,7 +5,7 @@
     "url": "https://isokron.ai"
   },
   "description": "cc-anchor: a Claude Code plugin whose anchor card (goal, invariants, breadcrumbs, cursor) survives context compaction. This repository is its own marketplace.",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "plugins": [
     {
       "name": "cc-anchor",
