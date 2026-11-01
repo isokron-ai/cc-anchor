@@ -4,7 +4,7 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
-## [0.3.0] — unreleased
+## [0.3.0] — 2026-11-01
 
 Fixes from the adoption audit (B1, B2, B5 on the cc-anchor side). Needs
 sea-lite ≥ 0.4.0 for the scope guard and the heartbeat; with an older
