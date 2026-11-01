@@ -61,6 +61,21 @@ without it.
   one `orient --focus retractions`. Every call is bounded (`push_timeout`)
   with the existing portable watchdog; any failure fails open, logs one
   line and backs off for 60 s.
+- **A corrupt store is reported, not silently skipped** (stress finding
+  S2). When an orient result says `integrity.ok === false`, the push
+  injects one top-priority warning per distinct problem ("kronicle-lite
+  STORE INTEGRITY FAILURE at seq N: <problem>; do not act on recalled
+  runbooks…"), delivers no retractions from that store (the cursor stays
+  put; they arrive after a repair), and the pulse denies world-changing
+  commands until a fresh read says ok (`pulse_mode: warn` still only
+  warns). kronicle-lite ≤ 0.6.0 throws on a corrupt event instead; that
+  lands in the "unavailable" path below.
+- **"Feed offline" advisory.** A kronicle-lite that cannot be read (CLI
+  missing from the cache, crash, timeout, non-JSON output) still fails
+  open and is logged; after `push_offline_after` (20) consecutive calls in
+  that state the agent gets one advisory that retractions are not being
+  pushed and it must re-read sources itself. Resets when the store is
+  readable again; `0` disables it.
 - `SessionStart`, `PostToolUse` and the new Bash `PreToolUse` entries keep
   a 10 s hook timeout (two bounded CLI calls fit).
 - `npm test` runs test files one at a time (`--test-concurrency=1`): the

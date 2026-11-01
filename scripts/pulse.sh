@@ -9,7 +9,9 @@
 #     very last tool result, with no tool call since (the agent decided on
 #     this command before it could act on them);
 #   * new — retractions that landed since this session's cursor (a change
-#     the push could not deliver yet: it arrived after the last tool call).
+#     the push could not deliver yet: it arrived after the last tool call);
+#   * a store that reports integrity.ok=false (corrupt / tampered chain):
+#     denied until a fresh read says it is ok again.
 #
 # A blocking one (semantic, severity safety|behavioral; cosmetic only when
 # kronicle-lite says so) DENIES the command with the diff in the reason: the
@@ -67,8 +69,26 @@ chain="$(cc_cfg_raw pulse_chain)"; [[ "$chain" == check ]] || chain="split"
 
 pending=""
 [[ -s "$CC_KL_B.pending" ]] && pending="$(cat "$CC_KL_B.pending" 2>/dev/null)"
+had_integ=0; [[ -s "$CC_KL_S.integrity" ]] && had_integ=1
 CC_KL_FAILED=0
 cc_kl_fetch || true
+
+# A store that reports integrity.ok=false blocks world-changing commands
+# until it is repaired (re-checked right now if the failure is older than
+# this call). pulse_mode=warn still only warns.
+if [[ -s "$CC_KL_S.integrity" ]]; then
+  if (( had_integ == 0 )) || cc_kl_integrity_recheck; then
+    itext="$(cc_kl_integrity_text)"
+    if [[ "$mode" == warn ]]; then
+      cc_log "pulse: warned before \`${head:0:60}\` (store integrity failure)"
+      cc_emit_context PreToolUse "cc-anchor pulse (warn): \`${head}\` is about to run while ${itext#cc-anchor: }"
+    else
+      cc_log "pulse: denied \`${head:0:60}\` (store integrity failure)"
+      cc_emit_deny "cc-anchor pulse: did NOT run \`${head}\` — ${itext#cc-anchor: }"
+    fi
+    exit 0
+  fi
+fi
 
 block_lines="$pending"
 if (( KL_BLOCK > 0 )); then block_lines="${block_lines:+$block_lines

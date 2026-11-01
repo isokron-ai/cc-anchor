@@ -64,9 +64,9 @@ test('pulse.jq: pulse_match is configurable (JSON-escaped backslashes are accept
 function render(orient, showCosmetic = '0') {
   const r = spawnSync('jq', ['-r', '--arg', 'show_cosmetic', showCosmetic, '-f', path.join(SCRIPTS, 'retractions.jq')], { input: JSON.stringify(orient), encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  const [cursor, seq, counts, ...lines] = r.stdout.replace(/\n$/, '').split('\n');
+  const [cursor, seq, counts, integrity, ...lines] = r.stdout.replace(/\n$/, '').split('\n');
   const [shown, blocking, cosmetic] = counts.split(' ').map(Number);
-  return { cursor, seq, shown, blocking, cosmetic, lines };
+  return { cursor, seq, shown, blocking, cosmetic, integrity, lines };
 }
 const R = (extra) => ({ seq: 7, event_type: 'block.superseded', kind: 'supersession', severity: 'behavioral', doc_slug: 'runbook', heading_path: ['Runbook', 'Deploy'], old_text: 'target: staging-a', new_text: 'target: staging-b', diff: 'target: [-staging-a-]{+staging-b+}', reason_line: 'x', ...extra });
 
@@ -92,6 +92,13 @@ test('retractions.jq: cosmetic flag (kronicle-lite next) — hidden by default, 
   assert.equal(all.shown, 6);
   assert.equal(all.blocking, 2, 'shown cosmetic ones still never block');
   assert.equal(all.lines.filter((l) => /, cosmetic\)/.test(l)).length, 3);
+});
+
+test('retractions.jq: integrity line — "ok" unless integrity.ok === false (then seq and problem)', () => {
+  assert.equal(render({ cursor: 'c', head: { seq: 3 }, retractions: [] }).integrity, 'ok', 'no integrity object (focus=pulse, older kl)');
+  assert.equal(render({ cursor: 'c', head: { seq: 3 }, integrity: { ok: true, problem: null }, retractions: [] }).integrity, 'ok');
+  assert.equal(render({ cursor: 'c', head: { seq: 3 }, integrity: { ok: false, seq: 2, problem: 'event 2: bad payload' }, retractions: [] }).integrity, 'fail\u001f2\u001fevent 2: bad payload');
+  assert.equal(render({ cursor: 'c', head: { seq: 3 }, integrity: { ok: false }, retractions: [] }).integrity, 'fail\u001f?\u001fintegrity check failed');
 });
 
 test('retractions.jq: long lists and long text are bounded', () => {

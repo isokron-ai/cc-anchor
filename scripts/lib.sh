@@ -574,12 +574,18 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 #            it); a world-changing command issued straight after the push is
 #            denied first.
 #   fail     epoch of the last CLI failure (back-off: retry after 60 s)
+#   integrity  "<seq>\x1f<problem>" while kronicle-lite reports integrity.ok
+#            false (corrupt / tampered store); intwarned: the problem this
+#            agent was last warned about (once per distinct problem)
+#   down     consecutive push/pulse calls that could not read the store (CLI
+#            missing from the cache, timeout, error, non-JSON); downwarned:
+#            the one "feed offline" advisory of this outage was given
 #
 # Fail-open everywhere: a missing CLI, a slow or broken store, a timeout
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_SID=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_FAILED=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -594,6 +600,7 @@ cc_kl_session() {
   local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
   CC_KL_SID="${s:-nosession}"
   CC_KL_B="$CC_RUN/push/$CC_KL_SID"
+  CC_KL_S="$CC_KL_B"   # store-wide state (integrity, outage); per session
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
@@ -653,10 +660,53 @@ cc_kl_orient() {
   else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
 }
 
+# Unavailable bookkeeping: every push/pulse call that could not read the
+# store (failure, or inside the back-off) counts; any successful read resets.
+cc_kl_down() {
+  local n=0; [[ -s "$CC_KL_S.down" ]] && IFS= read -r n < "$CC_KL_S.down"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$((n + 1))" > "$CC_KL_S.down" 2>/dev/null || true
+}
+cc_kl_up() {
+  [[ -e "$CC_KL_S.down" ]] || return 0
+  rm -f "$CC_KL_S.down" "$CC_KL_S.downwarned" 2>/dev/null
+  cc_log "push: kronicle-lite readable again; retraction feed back online"
+}
+
+# cc_kl_integrity_note <seq> <problem> | ok — record what the last briefing
+# said about store integrity.
+cc_kl_integrity_note() {
+  if [[ "$1" == ok ]]; then
+    [[ -e "$CC_KL_S.integrity" ]] || return 0
+    rm -f "$CC_KL_S.integrity" 2>/dev/null
+    cc_log "push: kronicle-lite integrity ok again"
+    return 0
+  fi
+  local cur=""; [[ -s "$CC_KL_S.integrity" ]] && IFS= read -r cur < "$CC_KL_S.integrity"
+  [[ "$cur" == "$1"$'\x1f'"$2" ]] && return 0
+  printf '%s\x1f%s\n' "$1" "$2" > "$CC_KL_S.integrity" 2>/dev/null || true
+  cc_log "push: kronicle-lite INTEGRITY FAILURE at seq $1: $2"
+}
+
+# Parse one orient JSON's integrity (any focus): sets the note when ok:false.
+# Echoes nothing; returns 0 when the store reported a failure.
+cc_kl_integrity_from() {
+  local line
+  line="$(jq -r 'if (.integrity | type) == "object" and .integrity.ok == false
+    then "fail\u001f\(.integrity.seq // .integrity.at_seq // .integrity.first_bad_seq // "?")\u001f\(.integrity.problem // .integrity.error // "integrity check failed" | tostring | gsub("\\s+"; " ") | .[0:240])"
+    elif (.integrity | type) == "object" and .integrity.ok == true then "ok" else "" end' <<<"$1" 2>/dev/null)"
+  case "$line" in
+    fail*) local s p; IFS=$'\x1f' read -r _ s p <<<"$line"; cc_kl_integrity_note "$s" "$p"; return 0;;
+    ok) cc_kl_integrity_note ok;;
+  esac
+  return 1
+}
+
 cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_KL_B.fail" 2>/dev/null || true
   CC_KL_FAILED=1
+  cc_kl_down
   if [[ "$1" == 124 ]]; then cc_log_once kl_timeout "push: kronicle-lite orient timed out (push_timeout); failing open"
   else cc_log_once kl_err "push: kronicle-lite orient failed (exit $1); failing open"; fi
 }
@@ -665,7 +715,8 @@ cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
   [[ -s "$CC_KL_B.fail" ]] || return 1
   local t now; IFS= read -r t < "$CC_KL_B.fail" || t=0
   cc_epoch_now_var now
-  [[ "$t" =~ ^[0-9]+$ ]] && (( now - t < 60 )) && CC_KL_FAILED=1
+  if [[ "$t" =~ ^[0-9]+$ ]] && (( now - t < 60 )); then CC_KL_FAILED=1; cc_kl_down; return 0; fi
+  return 1
 }
 
 # cc_kl_init — start this session's cursor at the current head (silent).
@@ -679,6 +730,7 @@ cc_kl_init() {
   if [[ -z "$cur" ]]; then rm -f "$pre"; cc_kl_fail 2; return 1; fi
   printf '%s\n' "$cur" > "$CC_KL_B.cursor" && printf '%s\n' "$seq" > "$CC_KL_B.seq" && mv -f "$pre" "$CC_KL_B.stamp"
   rm -f "$pre" "$CC_KL_B.fail" 2>/dev/null
+  cc_kl_up
   return 0
 }
 
@@ -705,19 +757,35 @@ cc_kl_fetch() {
   out="$(cc_kl_orient --focus pulse)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
   seq="$(jq -r '.head.seq // empty' <<<"$out" 2>/dev/null)"
+  if [[ -z "$seq" ]]; then rm -f "$pre"; cc_kl_fail 3; return 1; fi
+  cc_kl_integrity_from "$out" || true
   [[ -s "$CC_KL_B.seq" ]] && IFS= read -r stored < "$CC_KL_B.seq"
-  if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; return 1; fi
+  if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up; return 1; fi
   IFS= read -r cur < "$CC_KL_B.cursor"
   out="$(cc_kl_orient --cursor "$cur" --focus retractions)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
   local sc=0; cc_on push_cosmetic 0 && sc=1
   local parsed
   parsed="$(jq -r --arg show_cosmetic "$sc" -f "$CC_LIB_DIR/retractions.jq" <<<"$out" 2>/dev/null)" || { rm -f "$pre"; cc_kl_fail 3; return 1; }
-  local ncur counts rest
+  local ncur counts rest integ
   ncur="${parsed%%$'\n'*}"; rest="${parsed#*$'\n'}"
   KL_SEQ="${rest%%$'\n'*}"; rest="${rest#*$'\n'}"
-  counts="${rest%%$'\n'*}"
+  counts="${rest%%$'\n'*}"; rest="${rest#*$'\n'}"
+  integ="${rest%%$'\n'*}"
   if [[ "$rest" == *$'\n'* ]]; then KL_BODY="${rest#*$'\n'}"; else KL_BODY=""; fi
+  if [[ "$integ" == fail* ]]; then
+    # The store says it is corrupt: deliver no retractions from it and keep
+    # the cursor where it was (after a repair they are re-read from there);
+    # remember the head so the next calls do not re-read it each time.
+    local iseq iprob; IFS=$'\x1f' read -r _ iseq iprob <<<"$integ"
+    cc_kl_integrity_note "$iseq" "$iprob"
+    printf '%s\n' "$KL_SEQ" > "$CC_KL_B.seq"
+    KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0
+    mv -f "$pre" "$CC_KL_B.stamp"; rm -f "$CC_KL_B.fail" 2>/dev/null
+    cc_kl_up
+    return 0
+  fi
+  cc_kl_integrity_note ok
   read -r KL_SHOWN KL_BLOCK KL_COS <<<"$counts"
   [[ "$KL_SHOWN" =~ ^[0-9]+$ ]] || KL_SHOWN=0
   [[ "$KL_BLOCK" =~ ^[0-9]+$ ]] || KL_BLOCK=0
@@ -728,7 +796,30 @@ cc_kl_fetch() {
   fi
   mv -f "$pre" "$CC_KL_B.stamp"
   rm -f "$CC_KL_B.fail" 2>/dev/null
+  cc_kl_up
   return 0
+}
+
+cc_kl_integrity_text() {
+  local s="?" p="integrity check failed"
+  [[ -s "$CC_KL_S.integrity" ]] && IFS=$'\x1f' read -r s p < "$CC_KL_S.integrity"
+  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE at seq ${s}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). The cc-anchor pulse blocks world-changing commands meanwhile (unless pulse_mode is warn)."
+}
+
+# cc_kl_integrity_recheck — re-read integrity now (bypassing the mtime gate):
+# 0 while the store still reports a failure (or cannot be read), 1 once ok.
+cc_kl_integrity_recheck() {
+  local cur="" out rc
+  [[ -s "$CC_KL_B.cursor" ]] && IFS= read -r cur < "$CC_KL_B.cursor"
+  local -a c=(); [[ -n "$cur" ]] && c=(--cursor "$cur")
+  out="$(cc_kl_orient ${c[@]+"${c[@]}"} --focus retractions)"; rc=$?
+  (( rc == 0 )) && [[ -n "$out" ]] || return 0
+  cc_kl_integrity_from "$out" && return 0
+  [[ -e "$CC_KL_S.integrity" ]] && return 0
+  # Repaired: forget the head we parked at, so the next fetch re-reads the
+  # retractions since the (unmoved) cursor.
+  rm -f "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.intwarned" 2>/dev/null
+  return 1
 }
 
 # cc_kl_push <PostToolUse payload> — sets CC_KL_CONTEXT (empty: say nothing).
@@ -743,9 +834,31 @@ cc_kl_push() {
   # The agent got a tool call in since the last push: what it was told is no
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
-  cc_kl_fetch || return 0
-  (( KL_SHOWN > 0 )) || return 0
-  CC_KL_CONTEXT="cc-anchor: kronicle-lite changed while you were working — ${KL_SHOWN} retraction(s) since your last check (head seq ${KL_SEQ}). Anything you read before this may be stale:
+  cc_kl_fetch || true
+  # Top priority: a store that says it is corrupt (once per distinct problem).
+  local warn=""
+  if [[ -s "$CC_KL_S.integrity" ]]; then
+    local key="" seen=""; IFS= read -r key < "$CC_KL_S.integrity"
+    [[ -s "$CC_KL_B.intwarned" ]] && IFS= read -r seen < "$CC_KL_B.intwarned"
+    if [[ "$key" != "$seen" ]]; then
+      printf '%s\n' "$key" > "$CC_KL_B.intwarned" 2>/dev/null || true
+      warn="$(cc_kl_integrity_text)"
+    fi
+  fi
+  # A feed that has been unreadable for push_offline_after consecutive calls.
+  local after n=0; after="$(cc_cfg_raw push_offline_after)"; [[ "$after" =~ ^[0-9]+$ ]] || after=20
+  [[ -s "$CC_KL_S.down" ]] && IFS= read -r n < "$CC_KL_S.down"
+  if [[ "$n" =~ ^[0-9]+$ ]] && (( after > 0 && n >= after )) && [[ ! -e "$CC_KL_S.downwarned" ]]; then
+    : > "$CC_KL_S.downwarned"
+    cc_log "push: retraction feed offline for ${n} consecutive calls; advised the agent once"
+    warn="${warn:+$warn
+
+}cc-anchor: the kronicle-lite retraction feed has been offline for ${n} consecutive tool calls (the CLI is missing, failing or timing out; see .claude/cc-anchor/log). Changes to runbooks and notes are NOT being pushed to you right now: re-read the source (get_system_state with your cursor, recall) yourself before any world-changing command."
+  fi
+  if (( KL_SHOWN == 0 )); then CC_KL_CONTEXT="$warn"; return 0; fi
+  CC_KL_CONTEXT="${warn:+$warn
+
+}cc-anchor: kronicle-lite changed while you were working — ${KL_SHOWN} retraction(s) since your last check (head seq ${KL_SEQ}). Anything you read before this may be stale:
 ${KL_BODY}
 Re-read the affected document (recall, or get_system_state with your cursor) and use the current text before you act on it."
   if (( KL_COS > 0 )) && ! cc_on push_cosmetic 0; then CC_KL_CONTEXT="${CC_KL_CONTEXT} (${KL_COS} cosmetic edit(s) not shown.)"; fi
