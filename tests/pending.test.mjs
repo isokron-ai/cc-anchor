@@ -3,9 +3,10 @@
 // the agent's actor has pending changes, a re-read of the current version
 // clears it with no manual step, the push reminds once if a change stays
 // pending, and each subagent that names its own actor is gated on its own
-// reads. Runs against a kronicle-lite CLI that has `pending` (the lineage
-// build: $KRONICLE_LITE_PENDING_CLI, or ../kl-lineage/dist/cli.js); skipped
-// with a reason otherwise — the legacy path is covered by kronicle-contract.
+// reads. Runs against a kronicle-lite CLI that has `pending` (>= 0.8.0: CI
+// installs the published 0.8.0; or $KRONICLE_LITE_PENDING_CLI); skipped with a
+// reason otherwise — the legacy path is covered by kronicle-contract (CI's
+// 0.7.0 matrix leg). CC_ANCHOR_REQUIRE_PENDING=1 turns that skip into a failure.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -19,6 +20,12 @@ const CANDIDATES = [process.env.KRONICLE_LITE_PENDING_CLI, process.env.KRONICLE_
 const hasPending = (cli) => spawnSync('node', [cli, 'pending', '--actor', 'probe', '--json', '--data-dir', fs.mkdtempSync(path.join(os.tmpdir(), 'klcap-'))], { encoding: 'utf8' }).status === 0;
 const KL = CANDIDATES.find((f) => f && fs.existsSync(f) && hasPending(f));
 const opts = { skip: !KL && 'no kronicle-lite with `pending` (>= 0.8.0) found; set KRONICLE_LITE_PENDING_CLI' };
+
+if (process.env.CC_ANCHOR_REQUIRE_PENDING === '1') {
+  test('a kronicle-lite with `pending` (>= 0.8.0) is available (CC_ANCHOR_REQUIRE_PENDING=1)', () => {
+    assert.ok(KL, `no kronicle-lite with \`pending\` found; tried ${CANDIDATES.filter(Boolean).join(', ')}. Run \`npm i --no-save kronicle-lite@0.8.0\` or set KRONICLE_LITE_PENDING_CLI.`);
+  });
+}
 
 const RB = (target) => `# Runbook\n\n## Deploy\n\nDeploy with ./bin/deploy --target ${target}.\n`;
 const SID = 'sess-pend-0001';

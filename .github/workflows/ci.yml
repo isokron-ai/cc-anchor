@@ -7,7 +7,20 @@ on:
 
 jobs:
   test:
+    name: test (kronicle-lite ${{ matrix.kronicle }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0.8.0: version-bound `pending` gate (tests/pending.test.mjs must run, not skip).
+        # 0.7.0: the legacy "retraction since the last look" path stays covered.
+        include:
+          - kronicle: 0.8.0
+            require_pending: '1'
+          - kronicle: 0.7.0
+            require_pending: '0'
+    env:
+      CC_ANCHOR_REQUIRE_PENDING: ${{ matrix.require_pending }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,7 +31,7 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.7.0
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@${{ matrix.kronicle }}
       - name: Test
         run: npm test
       - name: Wall-clock budget tests (informational, non-blocking)
@@ -59,6 +72,8 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    env:
+      CC_ANCHOR_REQUIRE_PENDING: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -67,7 +82,7 @@ jobs:
       - name: Install jq
         run: brew install jq
       - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.7.0
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.8.0
       - name: Which bash the hooks get
         run: which -a bash || true; bash --version | head -1; /bin/bash --version | head -1
       - name: Test on macOS (BSD date, /bin/bash 3.2)

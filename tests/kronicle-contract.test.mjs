@@ -1,5 +1,5 @@
 // Contract tests for the 0.4.0 retraction push / pulse against the REAL
-// kronicle-lite CLI (>= 0.5.0; CI installs the published 0.6.0), the same way
+// kronicle-lite CLI (>= 0.5.0; CI installs the published 0.8.0 and 0.7.0), the same way
 // sea-contract.test.mjs pins the scope guard to the real sea-lite.
 //
 // The CLI is found at $KRONICLE_LITE_CLI, ./node_modules/kronicle-lite, or a
@@ -27,7 +27,7 @@ const opts = { skip: SKIP || (!KL && 'kronicle-lite CLI not found (see the first
 const CAP = !!KL && spawnSync('node', [KL, 'pending', '--actor', 'probe', '--json', '--data-dir', fs.mkdtempSync(path.join(os.tmpdir(), 'klcap-'))], { encoding: 'utf8' }).status === 0;
 
 test('the real kronicle-lite CLI (>= 0.5.0) is available for the contract tests', { skip: SKIP }, () => {
-  assert.ok(KL, `kronicle-lite CLI not found; tried ${CANDIDATES.filter(Boolean).join(', ')}. Run \`npm i --no-save kronicle-lite@0.6.0\`, set KRONICLE_LITE_CLI, or CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1 to skip.`);
+  assert.ok(KL, `kronicle-lite CLI not found; tried ${CANDIDATES.filter(Boolean).join(', ')}. Run \`npm i --no-save kronicle-lite@0.8.0\`, set KRONICLE_LITE_CLI, or CC_ANCHOR_SKIP_KRONICLE_CONTRACT=1 to skip.`);
   const r = spawnSync('node', [KL, '--version'], { encoding: 'utf8' });
   assert.match(r.stdout.trim(), /^(0\.([5-9]|\d{2,})|[1-9])\./, `kronicle-lite ${r.stdout.trim()} is older than 0.5.0 (no retraction diff)`);
 });
