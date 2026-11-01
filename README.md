@@ -245,6 +245,19 @@ Blocking = semantic and severity `safety` or `behavioral`. The agent
 re-reads and runs the command again; the retraction was delivered, so the
 second attempt runs. `pulse_mode: warn` turns the deny into context.
 
+**What counts as world-changing.** Each pipeline stage is tokenized like a
+shell would (quotes stripped from the command name, whitespace collapsed),
+wrappers are dropped with their options (`sudo -E`, `env -i`, `nice -n`,
+`timeout 600`, `time`, `nohup`), and the tool's global options are skipped,
+so `git -C ../svc --no-pager push`, `kubectl -n prod apply`, `terraform
+-chdir=infra apply` and `npm --prefix web publish` all match. Quoted
+arguments never match (`git commit -m "release notes"`). The code of
+interpreter one-liners (`python -c`, `node -e`, `perl -e`, `ruby -e`,
+`bash -c`, `eval`) is scanned; a world-changing one is denied **once** and
+the identical retry runs. This matcher is defence in depth, not a boundary:
+a command it does not name, or one buried in a script, is only caught at
+exec time, by a shim on `PATH` (kronicle-lite shims, next cycle).
+
 **Chains.** The push only fires *between* tool calls, so in
 `./bin/build && ./bin/migrate && ./bin/deploy` a runbook change that lands
 during the build reaches the agent after the stale deploy (Track B finding
@@ -511,7 +524,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 113 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 116 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

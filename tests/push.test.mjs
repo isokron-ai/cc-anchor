@@ -29,6 +29,77 @@ test('pulse.jq: plain world-changing commands match, with word boundaries', () =
   }
 });
 
+// Adversarial corpus from agent-memory-bench stress/cca/pulse-corpus.sh (W = must
+// be world-changing, Q = must stay quiet). Literal \\t / \\n are expanded like printf.
+const CORPUS = [
+  ["W", "git push origin main", "control"],
+  ["W", "git -C ../svc push origin main", "git global option before subcommand"],
+  ["W", "git --no-pager push", "git global option"],
+  ["W", "git -c push.default=current push", "git -c option"],
+  ["W", "git  push", "two spaces"],
+  ["W", "git\\tpush", "tab"],
+  ["W", "\"git\" push", "quoted command name"],
+  ["W", "kubectl -n prod apply -f k8s/", "kubectl namespace flag before verb"],
+  ["W", "kubectl --context prod apply -f k8s/", "kubectl context flag"],
+  ["W", "terraform -chdir=infra apply -auto-approve", "terraform -chdir"],
+  ["W", "TF_VAR_env=prod terraform apply", "env prefix"],
+  ["W", "sudo -E terraform apply", "sudo flags"],
+  ["W", "env -i PATH=/usr/bin ./deploy.sh", "env flags"],
+  ["W", "bash -c \"kubectl apply -f x.yaml\"", "bash -c"],
+  ["W", "sh -c 'git push'", "sh -c"],
+  ["W", "eval \"$DEPLOY_CMD deploy\"", "eval"],
+  ["W", "python3 -c \"import os; os.system('git push')\"", "python -c"],
+  ["W", "node -e \"require('child_process').execSync('npm publish')\"", "node -e"],
+  ["W", "make release", "make target"],
+  ["W", "npm run deploy", "npm script named deploy"],
+  ["W", "./scripts/deploy.sh --env prod", "script path"],
+  ["W", "(cd svc && git push)", "subshell"],
+  ["W", "{ git push; }", "brace group"],
+  ["W", "cat <<EOF | bash\\ngit push\\nEOF", "here-doc piped to bash"],
+  ["W", "ssh prod 'sudo systemctl restart api && ./deploy'", "ssh"],
+  ["W", "nohup ./deploy.sh &", "nohup background"],
+  ["W", "time git push", "time"],
+  ["W", "command git push", "command builtin"],
+  ["W", "exec git push", "exec"],
+  ["W", "xargs -I{} git push {} < remotes.txt", "xargs"],
+  ["W", "git push --force-with-lease", "control"],
+  ["W", "timeout 600 terraform apply", "timeout wrapper"],
+  ["W", "nice -n 10 ./deploy.sh", "nice with flags"],
+  ["W", "watch -n 60 ./deploy.sh", "watch wrapper"],
+  ["W", "git commit -am wip && git push", "chain"],
+  ["W", "gh release create v1.2.3", "gh release"],
+  ["W", "DRY_RUN=0 make -C infra deploy", "make -C"],
+  ["Q", "git commit -m \"release notes\"", "quoted text"],
+  ["Q", "grep -r deploy src/", "read-only"],
+  ["Q", "cat deploy.yaml", "read-only"],
+  ["Q", "echo git push", "echo"],
+  ["Q", "ls deployments/", "no word boundary"],
+  ["Q", "git log --grep=release", "read-only git"],
+  ["Q", "# git push\\nls", "comment"],
+  ["Q", "npm run predeploy-check", "predeploy"],
+];
+test('pulse.jq: stress corpus — every world-changing form detected (global options, quoting, whitespace, wrappers, one-liners), no false alarms', () => {
+  const bad = [];
+  for (const [want, raw, note] of CORPUS) {
+    const cmd = raw.replace(/\\t/g, '\t').replace(/\\n/g, '\n');
+    const got = analyse(cmd).world.length ? 'W' : 'Q';
+    if (got !== want) bad.push(`${want}≠${got}: ${raw} (${note})`);
+  }
+  assert.deepEqual(bad, []);
+});
+
+test('pulse.jq: tool global options are skipped, read-only verbs behind them stay quiet; one-liners are flagged', () => {
+  assert.deepEqual(analyse('git --no-pager log --grep=release').world, [], 'read-only behind a global option');
+  assert.deepEqual(analyse('git -C ../svc status').world, []);
+  assert.equal(analyse('npm --prefix web publish').world.length, 1);
+  assert.equal(analyse('helm -n prod upgrade x && kubectl --kubeconfig k apply -f y').world.length, 1);
+  assert.equal(analyse("python3 -c \"import os; os.system('git push')\"").oneliner.length, 1);
+  assert.equal(analyse("perl -e 'system(\"make deploy\")'").oneliner.length, 1);
+  assert.equal(analyse("bash -lc 'git push'").oneliner.length, 1);
+  assert.deepEqual(analyse('python3 -c "print(1)"').world, [], 'a harmless one-liner is quiet');
+  assert.deepEqual(analyse('git push').oneliner, []);
+});
+
 test('pulse.jq: chains — a world-changing step after a non-inert step is risky; cd/export/read-only steps are not', () => {
   const f2 = analyse('./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target x');
   assert.deepEqual(f2.world, ['./bin/migrate', './bin/deploy --target x']);
