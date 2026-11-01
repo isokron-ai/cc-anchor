@@ -60,7 +60,10 @@ function readStdin() {
 export function findSeaModule(env = process.env) {
   const home = env.HOME || os.homedir();
   const cands = [];
-  if (env.CC_ANCHOR_SEA_MODULE) cands.push(env.CC_ANCHOR_SEA_MODULE);
+  // An explicit override is authoritative: a wrong path must report "not
+  // found", never silently fall through to some other sea-lite install
+  // (different version / native build) found in the cache or cwd.
+  if (env.CC_ANCHOR_SEA_MODULE) return resolveEntry(env.CC_ANCHOR_SEA_MODULE);
   const cache = path.join(home, '.claude', 'plugins', 'cache');
   try {
     for (const mk of fs.readdirSync(cache)) {
@@ -103,7 +106,7 @@ const TERMINAL = new Set(['resolved', 'wont_fix', 'duplicate', 'dropped', 'merge
 
 async function openStore() {
   const entry = findSeaModule();
-  if (!entry) throw new Error('sea-lite module not found (set CC_ANCHOR_SEA_MODULE)');
+  if (!entry) throw new Error(process.env.CC_ANCHOR_SEA_MODULE ? `sea-lite module not found at CC_ANCHOR_SEA_MODULE=${process.env.CC_ANCHOR_SEA_MODULE}` : 'sea-lite module not found (set CC_ANCHOR_SEA_MODULE)');
   const mod = await import(pathToFileURL(entry).href);
   const SeaLite = mod.SeaLite || mod.default?.SeaLite;
   if (!SeaLite) throw new Error(`no SeaLite export in ${entry}`);

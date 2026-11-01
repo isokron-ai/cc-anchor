@@ -32,6 +32,22 @@ sea-lite both fail open and say so in the log.
   is shared by every session of a project; the guard now considers only the
   stopping session's claims, instead of blocking an unrelated session and
   printing another session's claim tokens.
+- **Hooks ran a different `node` than the user's.** `lib.sh` prepended
+  `/opt/homebrew/bin:/usr/local/bin` to `PATH`, so a Homebrew or system node
+  shadowed nvm / volta / setup-node; sea-lite's `better-sqlite3`, built for
+  the user's node, then failed to load (`NODE_MODULE_VERSION` mismatch) and
+  the scope guard, heartbeat and task mirror silently failed open. Those
+  dirs are now appended as a fallback only.
+- **`scope_timeout` was not enforced on macOS.** The guard bounded
+  `scope-check` with `timeout(1)`, which macOS does not ship, so a hung
+  sea-lite stalled every edit until Claude Code's hook timeout. It now uses
+  `timeout`, `gtimeout`, or a portable process-group watchdog.
+- **`CC_ANCHOR_SEA_MODULE` is authoritative.** A path that does not resolve
+  is reported as not found instead of falling through to another sea-lite
+  install in the plugin cache or `node_modules`.
+- **Worktree paths keep the project's spelling.** `WorktreeCreate` printed
+  git's symlink-resolved toplevel (macOS `/var` → `/private/var`); it now
+  keeps `$CLAUDE_PROJECT_DIR`'s spelling when that is the toplevel.
 
 ### Added
 - **Lease heartbeat (B5)** (`heartbeat`, auto): PostToolUse renews the

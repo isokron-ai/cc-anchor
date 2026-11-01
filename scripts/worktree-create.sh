@@ -39,6 +39,11 @@ name="${name//[^A-Za-z0-9._-]/-}"
 root="${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
 cc_resolve "$root"
 repo="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || { echo "cc-anchor worktree-create: $root is not a git repository" >&2; exit 1; }
+# git prints the symlink-resolved path (macOS: /var → /private/var). When the
+# project dir IS the toplevel, keep its spelling so the printed worktree path,
+# state.worktrees keys and trail entries stay under $CLAUDE_PROJECT_DIR.
+root="${root%/}"
+[[ "$repo" != "$root" ]] && [[ "$(cd "$root" 2>/dev/null && pwd -P)" == "$repo" ]] && repo="$root"
 dir="$repo/.claude/worktrees/$name"
 branch="worktree-$name"
 

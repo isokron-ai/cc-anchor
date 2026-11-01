@@ -99,9 +99,8 @@ if [[ -z "$verdict" ]]; then
   args+=("$file")
   if bin="$(cc_find_cli sea-lite)"; then
     to="$(cc_cfg_raw scope_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=4
-    tcmd=(); if command -v timeout >/dev/null 2>&1; then tcmd=(timeout "$to"); fi
-    if [[ "$bin" == *.js || "$bin" == *.mjs ]]; then out="$(${tcmd[@]+"${tcmd[@]}"} node "$bin" "${args[@]}" 2>/dev/null)"; rc=$?
-    else out="$(${tcmd[@]+"${tcmd[@]}"} "$bin" "${args[@]}" 2>/dev/null)"; rc=$?; fi
+    if [[ "$bin" == *.js || "$bin" == *.mjs ]]; then out="$(cc_with_timeout "$to" node "$bin" "${args[@]}" 2>/dev/null)"; rc=$?
+    else out="$(cc_with_timeout "$to" "$bin" "${args[@]}" 2>/dev/null)"; rc=$?; fi
   else
     rc=127
   fi

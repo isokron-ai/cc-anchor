@@ -723,12 +723,21 @@ test('PreToolUse scope guard fails open: no binary, unsupported subcommand (exit
     fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
     hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: old });
     assert.equal(fs.readFileSync(path.join(sb.run, 'log'), 'utf8').split('\n').filter((l) => /unsupported/.test(l)).length, n, 'logged once');
-    const slow = fakeCli(sb, 'sea-lite', 'sleep 3; exit 1');
-    fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
-    const t0 = Date.now();
-    r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: slow, CC_ANCHOR_SCOPE_TIMEOUT: '1' });
-    assert.equal(r.stdout, '');
-    assert.ok(Date.now() - t0 < 2500, 'bounded by scope_timeout');
+    // The fake hangs 10 s; scope_timeout is 1 s. The bound is 5 s, not ~1 s:
+    // a cold hook on a shared macOS runner spends well over a second in
+    // bash/jq startup, and anything under the fake's 10 s proves the kill.
+    // Run twice: timeout(1) when present, and the set -m watchdog fallback
+    // that macOS (no timeout/gtimeout) actually uses.
+    const slow = fakeCli(sb, 'sea-lite', 'sleep 10; exit 1');
+    for (const fallback of ['0', '1']) {
+      fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
+      const t0 = Date.now();
+      r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: slow, CC_ANCHOR_SCOPE_TIMEOUT: '1', CC_ANCHOR_TEST_NO_TIMEOUT_BIN: fallback });
+      const ms = Date.now() - t0;
+      assert.equal(r.status, 0); assert.equal(r.stdout, '');
+      assert.ok(ms < 5000, `bounded by scope_timeout (fallback=${fallback}): ${ms} ms`);
+    }
+    assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /exited 124 \(crash or timeout\)/);
   } finally { sb.cleanup(); }
 });
 
@@ -1082,10 +1091,14 @@ test('CLI resolution order: CC_ANCHOR_<NAME>_BIN > PATH > plugin cache node_modu
     const onPath = fakeCli(sb, 'sea-lite', 'exit 0');
     assert.equal(find({ PATH: `${path.join(sb.base, 'bin')}:/usr/bin:/bin` }), onPath, 'PATH beats the cache');
     assert.equal(find({ CC_ANCHOR_SEA_LITE_BIN: '/explicit/sea-lite' }), '/explicit/sea-lite', 'env beats everything');
-    // cc_run_cli runs a cli.js through node
-    const run = _spawnSync('bash', ['-c', `. "${path.join(SCRIPTS, 'lib.sh')}"; cc_resolve "${sb.proj}"; cc_run_cli sea-lite scope-check --paths x`], { encoding: 'utf8', env: { ...sb.env, PATH: process.env.PATH, HOME: sb.home } });
+    // cc_run_cli runs a cli.js through node. PATH holds node and nothing
+    // else: under `npm test` process.env.PATH starts with node_modules/.bin,
+    // which has the real sea-lite once CI installs it, and PATH beats the cache.
+    const nodeBin = path.join(sb.base, 'nodebin'); fs.mkdirSync(nodeBin); fs.symlinkSync(process.execPath, path.join(nodeBin, 'node'));
+    const nodePath = `${nodeBin}:/usr/bin:/bin`;
+    const run = _spawnSync('bash', ['-c', `. "${path.join(SCRIPTS, 'lib.sh')}"; cc_resolve "${sb.proj}"; cc_run_cli sea-lite scope-check --paths x`], { encoding: 'utf8', env: { ...sb.env, PATH: nodePath, HOME: sb.home } });
     assert.equal(run.stdout, '["scope-check","--paths","x"]');
-    assert.equal(JSON.parse(cli(['doctor', '--json'], sb.env, { PATH: process.env.PATH }).stdout)['sea-lite cli'], cached, 'anchor.mjs mirrors the same lookup');
+    assert.equal(JSON.parse(cli(['doctor', '--json'], sb.env, { PATH: nodePath }).stdout)['sea-lite cli'], cached, 'anchor.mjs mirrors the same lookup');
   } finally { sb.cleanup(); }
 });
 

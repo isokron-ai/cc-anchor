@@ -33,8 +33,12 @@
 # missing) would shift every later value one slot to the left.
 #
 # Claude Code spawns hooks with a minimal PATH on some hosts (Homebrew
-# node/jq live outside it). Harmless elsewhere.
-export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+# node/jq live outside it), so those dirs are a FALLBACK: appended, never
+# prepended. Prepending made a Homebrew / system node shadow the node the
+# user runs (nvm, volta, setup-node), so sea-lite's better-sqlite3, built
+# for the user's node, failed to load with a NODE_MODULE_VERSION mismatch
+# and the scope guard, heartbeat and task mirror silently failed open.
+export PATH="${PATH:+${PATH}:}/opt/homebrew/bin:/usr/local/bin"
 export TZ=UTC
 
 CC_LIB_DIR="${BASH_SOURCE[0]%/*}"; [[ "$CC_LIB_DIR" == "${BASH_SOURCE[0]}" ]] && CC_LIB_DIR=.
@@ -353,6 +357,34 @@ cc_find_cli() {
     [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
   done
   return 1
+}
+
+# cc_with_timeout SECS CMD… — run CMD, killing it (and its children) after
+# SECS; exit status 124 on timeout, like GNU timeout. Uses timeout(1) or
+# gtimeout(1) when present. macOS ships neither, and the old code simply ran
+# without a bound there, so a hung sea-lite stalled every Edit until Claude
+# Code's own hook timeout. The fallback runs CMD in its own process group
+# (set -m) with a watchdog that signals the whole group, so a wrapper
+# script's children cannot keep a $(…) capture open after the kill.
+# CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests).
+cc_with_timeout() {
+  local to="$1"; shift
+  if [[ "${CC_ANCHOR_TEST_NO_TIMEOUT_BIN:-0}" != 1 ]]; then
+    if command -v timeout >/dev/null 2>&1; then timeout "$to" "$@"; return; fi
+    if command -v gtimeout >/dev/null 2>&1; then gtimeout "$to" "$@"; return; fi
+  fi
+  (
+    set -m
+    "$@" </dev/null &
+    cmd=$!
+    ( trap 'kill "${s:-}" 2>/dev/null; exit 0' TERM
+      sleep "$to" & s=$!; wait "$s"; kill -TERM -- "-$cmd" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+    dog=$!
+    wait "$cmd"; rc=$?
+    kill -TERM -- "-$dog" 2>/dev/null
+    (( rc == 143 )) && rc=124
+    exit "$rc"
+  )
 }
 
 # cc_run_cli NAME ARGS… — run the CLI found by cc_find_cli (node for *.js).
