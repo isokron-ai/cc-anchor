@@ -254,8 +254,10 @@ so `git -C ../svc --no-pager push`, `kubectl -n prod apply`, `terraform
 -chdir=infra apply` and `npm --prefix web publish` all match. Quoted
 arguments never match (`git commit -m "release notes"`). The code of
 interpreter one-liners (`python -c`, `node -e`, `perl -e`, `ruby -e`,
-`bash -c`, `eval`) is scanned; a world-changing one is denied **once** and
-the identical retry runs. This matcher is defence in depth, not a boundary:
+`bash -c`, `eval`) and of here-documents an interpreter reads
+(`python3 - <<'PY'`, `cat <<EOF | bash`) is scanned; a world-changing one is
+denied **once** and the identical retry runs. Line continuations are joined
+and a quoted verb counts (`"git" "push"`). This matcher is defence in depth, not a boundary:
 a command it does not name, or one buried in a script, is only caught at
 exec time, by a shim on `PATH` (kronicle-lite shims, next cycle).
 
@@ -531,7 +533,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.6.0   # real CLIs for the contract tests
-npm test                    # node:test, 131 tests (files run one at a time: timing budgets)
+npm test                    # node:test, 134 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```

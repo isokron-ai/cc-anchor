@@ -31,6 +31,39 @@
 # not name, or one that runs inside a script, is only caught by an exec-time
 # check (kronicle-lite shims).
 
+# Code of an interpreter (one-liner or here-doc) as plain words, so
+# subprocess.run(['git','push']) and execFileSync('npm', ['publish']) read as
+# "git push" / "npm publish".
+def codewords: gsub("[\\[\\]'\"`,()]"; " ") | gsub("\\s+"; " ");
+
+def interp: sub("^.*/"; "") | test("^(bash|sh|zsh|dash|ksh|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php)$");
+
+# Here-documents: [{d: delimiter, head: the line that opens it, body: text}].
+# The body is cut out before lexing (its quotes and semicolons are not shell)
+# and scanned as code when an interpreter reads it.
+def heredocs:
+  split("\n") as $L
+  | reduce range(0; $L | length) as $i ({out: [], cur: null};
+      if .cur != null then
+        (if ($L[$i] | sub("^\\t+"; "")) == .cur.d then .out += [.cur] | .cur = null
+         else .cur.body += [$L[$i]] end)
+      else ([$L[$i] | capture("<<-?\\s*['\"]?(?<d>[A-Za-z_][A-Za-z0-9_]*)['\"]?")] | first) as $m
+        | if $m == null then . else .cur = {d: $m.d, head: $L[$i], body: []} end
+      end)
+  | .out + (if .cur != null then [.cur] else [] end)
+  | map(.body |= join("\n"));
+
+# The command without here-doc bodies (and their closing delimiter lines).
+def strip_heredocs:
+  split("\n") as $L
+  | reduce range(0; $L | length) as $i ({keep: [], d: null};
+      if .d != null then (if ($L[$i] | sub("^\\t+"; "")) == .d then .d = null else . end)
+      else .keep += [$L[$i]]
+        | ([$L[$i] | capture("<<-?\\s*['\"]?(?<d>[A-Za-z_][A-Za-z0-9_]*)['\"]?")] | first) as $m
+        | if $m == null then . else .d = $m.d end
+      end)
+  | .keep | join("\n");
+
 def lex:
   explode as $a
   | ($a | length) as $n
@@ -68,7 +101,8 @@ def stages:
   | reduce range(0; $a | length) as $i (
       {st: [], ws: [], cur: null, q: null, esc: false};
       ($a[$i] | [.] | implode) as $c
-      | if .esc then .esc = false | .cur = ((.cur // {w: "", q: false}) | .w += $c)
+      | if .esc and $c == "\n" then .esc = false | (if .cur != null then .ws += [.cur] | .cur = null else . end)
+        elif .esc then .esc = false | .cur = ((.cur // {w: "", q: false}) | .w += $c)
         elif .q == "'" then (if $c == "'" then .q = null else .cur.w += $c end)
         elif .q == "\"" then (if $c == "\"" then .q = null elif $c == "\\" then .esc = true else .cur.w += $c end)
         elif $c == "\\" then .esc = true
@@ -125,14 +159,18 @@ def oneliner_code:
 def part($re; $raw):
   (unwrap) as $u
   | ($u[0].w // "" | base) as $h
-  | ([$h] + ($u[1:] | skipopts($h) | map(if .q then "Q" else .w end))) as $cw
+  | ($u[1:] | skipopts($h)) as $args
+  # The verb (first argument after the tool's global options) counts even
+  # when quoted ("git" "push"); later quoted arguments never do.
+  | ($args | if $h == "git" and length > 1 and (.[0].w | IN("subtree", "lfs")) then .[1:] else . end) as $args
+  | ([$h] + ($args | to_entries | map(if .key == 0 then .value.w elif .value.q then "Q" else .value.w end))) as $cw
   | ($cw[1] // "") as $h2
   | ($cw | join(" ")) as $canon
   | ($h | IN("cd", "pushd", "popd", "export", "unset", "set", "source", ".", "true", ":", "echo", "printf", "test", "[", "[[", "alias", "umask", "ulimit", "local", "declare", "shopt")) as $builtin
   | (($h | IN("grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "bat", "less", "more", "head", "tail", "ls", "man", "which", "type", "wc", "file", "stat", "diff", "jq", "yq", "tree", "pwd", "whoami", "date"))
      or ($h == "git" and ($h2 | IN("log", "show", "diff", "status", "grep", "blame", "branch", "remote", "rev-parse", "fetch")))) as $readonly
   | ($u | oneliner_code) as $code
-  | ($code != null and ($code | test($re))) as $oneliner
+  | ($code != null and ($code | codewords | test($re))) as $oneliner
   | ($h | IN("ssh", "xargs")) as $opaque
   | {inert: ($builtin or $readonly or $h == ""),
      oneliner: $oneliner,
@@ -140,17 +178,25 @@ def part($re; $raw):
 
 # A segment is a pipeline: world-changing when any stage is (or a $( ) runs
 # one), inert when every stage is.
-def classify($re):
+def classify($re; $hd):
   . as $s
-  | [$s.raw | stages[] | select(length > 0) | part($re; $s.raw)] as $p
+  | [$s.raw | stages[] | select(length > 0)] as $st
+  | [$st[] | part($re; $s.raw)] as $p
+  # A here-doc read by an interpreter (python3 - <<PY, cat <<EOF | bash) is
+  # code: scan its body like a one-liner's.
+  | ([$s.raw | capture("<<-?\\s*['\"]?(?<d>[A-Za-z_][A-Za-z0-9_]*)['\"]?")] | first) as $m
+  | (if $m == null then null else ([$hd[] | select(.d == $m.d)] | first | .body // null) end) as $body
+  | ($body != null and ([$st[] | (.[0].w // "") | interp] | any) and ($body | codewords | test($re))) as $hdoc
   | {raw: $s.raw,
      inert: ($p | all(.inert)),
-     oneliner: ($p | any(.oneliner)),
-     world: (($p | any(.world)) or ([$s.raw | scan("\\$\\(([^)]*)\\)|`([^`]*)`") | map(. // "") | join(" ")] | join(" ") | test($re)))};
+     oneliner: (($p | any(.oneliner)) or $hdoc),
+     world: (($p | any(.world)) or $hdoc or ([$s.raw | scan("\\$\\(([^)]*)\\)|`([^`]*)`") | map(. // "") | join(" ")] | join(" ") | test($re)))};
 
 ($match | gsub("\\\\\\\\"; "\\")) as $m
 | ("(?<![A-Za-z0-9_])(?:" + $m + ")(?![A-Za-z0-9_])") as $re
-| ((.tool_input.command // "") | tostring | lex | map(classify($re))) as $segs
+| ((.tool_input.command // "") | tostring | gsub("\\\\\n"; " ")) as $cmd
+| ($cmd | heredocs) as $hd
+| ($cmd | strip_heredocs | lex | map(classify($re; $hd))) as $segs
 | ($segs | map(.world) | index(true)) as $first
 | {world: [$segs[] | select(.world) | .raw],
    risky: [range(0; $segs | length) as $i | select($segs[$i].world and ($segs[0:$i] | any(.inert | not))) | $segs[$i].raw],
