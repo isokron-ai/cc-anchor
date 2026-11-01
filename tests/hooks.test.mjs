@@ -934,7 +934,8 @@ test('WorktreeCreate/Remove pack (docs payloads): creates .claude/worktrees/<nam
     assert.match(sb.readCard(), /WorktreeCreate feature-auth/);
     assert.ok(JSON.parse(sb.readState().worktrees)[wt]);
     // a claim taken inside the worktree, then removal => pending release + dir and branch gone
-    hook('post-tool-use.sh', fixture('posttooluse-sea-claim.json', { cwd: wt }), sb.env);
+    // No background lease heartbeat: it would still be writing under the sandbox HOME when the test cleans up (macOS ENOTEMPTY).
+    hook('post-tool-use.sh', fixture('posttooluse-sea-claim.json', { cwd: wt }), sb.env, { CC_ANCHOR_HEARTBEAT: '0' });
     r = hook('worktree-remove.sh', fixture('worktreeremove.json', { cwd: sb.proj, worktree_path: wt }), sb.env);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(!fs.existsSync(wt));

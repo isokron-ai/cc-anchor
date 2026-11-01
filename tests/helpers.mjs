@@ -21,6 +21,9 @@ export function sandbox({ git = true } = {}) {
     HOME: home,
     CLAUDE_PROJECT_DIR: proj,
     TZ: 'UTC',
+    // Hooks that would background work (lease heartbeat, session document) run
+    // it inline: nothing may still be writing under HOME when a test cleans up.
+    CC_ANCHOR_SYNC: '1',
   };
   const card = path.join(proj, '.claude', 'anchor.md');
   const run = path.join(proj, '.claude', 'cc-anchor');
