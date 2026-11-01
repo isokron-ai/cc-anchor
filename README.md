@@ -20,6 +20,14 @@ Works without kronicle-lite. With it, the card carries your `get_system_state`
 cursor across the compaction and the injection tells Claude to re-present it
 as `since_cursor` before material work.
 
+**0.2.0 adds the lifecycle hooks pack**: sea-lite claim tracking with a
+Stop / SubagentStop guard ("release or hand off your claim first"), a
+kronicle-lite session document on every Stop, a PreToolUse scope guard, a
+Claude Code task → sea-lite ticket mirror, an InstructionsLoaded stamp, an
+opt-in worktree pack, and a Cursor port. Everything beyond the card is
+**opt-in** (`cc-anchor.json` / `CC_ANCHOR_*`) and inert for users without
+kronicle-lite or sea-lite. See [Lifecycle hooks pack](#lifecycle-hooks-pack).
+
 ## Install
 
 ```sh
@@ -97,11 +105,16 @@ with `claude -p --autocompact 100k` and prints every hook event.
 | `SessionStart` | `compact` | Injects the card verbatim under `ANCHOR — verbatim, read before anything else`, then the discipline, then (kronicle-lite only) `call get_system_state with since_cursor=<cursor> before material work`. |
 | `SessionStart` | `startup\|resume\|clear\|fork` | Injects the card if one exists, under a `session start` header. Silent otherwise. |
 | `PostToolUse` | `*` | Appends `{ts, tool, target}` to a rolling trail and re-renders the card's last-5 section. One `jq` call, ~10–20 ms. Captures the cursor from any `mcp__*__get_system_state` result. |
-| `UserPromptSubmit` | — | The bare word `anchor` re-injects the card. Everything else passes through. |
-| `Stop` | — | Rotates the trail; once per 30 min, a one-line nudge when the goal is > 45 min stale (`CC_ANCHOR_STOP_WARN=0` to disable). |
+| `UserPromptSubmit` | — | The bare word `anchor` re-injects the card. Everything else passes through — unless `InstructionsLoaded(compact)` found that the post-compaction injection did not run, in which case the card is re-asserted once with the next prompt. |
+| `Stop` | — | Rotates the trail; once per 30 min, a one-line nudge when the goal is > 45 min stale (`CC_ANCHOR_STOP_WARN=0` to disable). With the pack: claim guard, session document. |
+| `InstructionsLoaded` | `session_start\|compact\|nested_traversal\|path_glob_match\|include` | Stamps which CLAUDE.md / rules files were loaded (`Instructions:` line on the card) and arms the belt-and-braces re-assert after a compaction. Observe-only event. |
+| `PreToolUse` | `Edit\|Write\|MultiEdit\|NotebookEdit` | Scope guard (opt-in): denies an edit inside another actor's live sea-lite claim scope. ~6 ms when off. |
+| `SubagentStop` | — | Releases, or queues the release of, every sea-lite claim the stopping subagent took (auto when sea-lite is configured). |
+| `TaskCreated` / `TaskCompleted` | — | Task mirror (opt-in): native tasks → sea-lite tickets; completion gated on open predecessors. |
 
-All hooks fail open: missing `jq`, unwritable disk, malformed input → exit 0,
-no output, nothing blocked.
+All hooks fail open: missing `jq`, unwritable disk, malformed input, missing
+CLI → exit 0, no output, nothing blocked. Failures are written to
+`.claude/cc-anchor/log`, never to stdout.
 
 ### The card
 
@@ -179,6 +192,182 @@ Detection is file-based so the hooks stay fast; `/cc-anchor:anchor doctor
 --probe` runs `claude mcp list` for a definitive answer.
 `CC_ANCHOR_KRONICLE=1|0` overrides.
 
+## Lifecycle hooks pack
+
+Switches live in `.claude/cc-anchor.json` (project) or
+`~/.claude/cc-anchor/config.json` (user); `CC_ANCHOR_<KEY>` in the
+environment wins. `/cc-anchor:anchor config` shows the effective values;
+`config set claim_guard true` writes the file. The hooks read the JSON with
+bash pattern matching, so an unset switch costs no `jq` call.
+
+| Key | Default | Hook | What it turns on |
+| :- | :- | :- | :- |
+| `claim_guard` | off | `Stop` | Block the stop **once** per claim set while `claims.json` shows a live sea-lite claim: `{"decision":"block","reason":"release or hand off your sea-lite claim first: … sea_release {ticket_id, claim_token, note}"}`. `stop_hook_active=true` always short-circuits, so the 8-continuation cap is never approached. |
+| `session_doc` | off | `Stop` | `put_document` `session-<YYYY-MM-DD>-<sid8>` = anchor card + `last_assistant_message`, through the **kronicle-lite CLI** (`kronicle-lite put`, same SQLite store as the MCP server). Skipped when the message is unchanged. Runs in the background after the decision is printed. |
+| `subagent_release` | auto | `SubagentStop` | When the stopping `agent_id` holds live claims: block once with the exact `sea_release` calls, and append them to `pending-release.jsonl`, which the next `SessionStart` / `anchor` re-ground prints as *Pending sea-lite releases*. Auto = on when sea-lite is configured. |
+| `task_mirror` | off | `TaskCreated` / `TaskCompleted` | Mirror native tasks into sea-lite tickets (`kind: chore`, `status: triaged`, tags `cc-task`, `cc-task:<id>`, `idempotency_key: cc-task:<id>`); on completion claim + `sea_transition resolved`. Written through the sea-lite **library** (`scripts/task-mirror.mjs`). |
+| `task_mirror_gate` | on | `TaskCompleted` | With `task_mirror`: exit 2 (completion refused, reason fed back to Claude) while the ticket `depends_on` a non-terminal ticket or a non-terminal ticket `blocks` it. |
+| `scope_guard` | off | `PreToolUse` | Deny `Edit`/`Write` inside another actor's live claim scope: `sea-lite scope-check --paths <file>` → exit 1 + `{conflicts:[{holder,ticket,paths,expires}]}` becomes `permissionDecision: "deny"` naming the holder. Verdicts are cached per path for `scope_ttl` s (30) and the cache is dropped whenever a `sea_*` result passes through PostToolUse. Cached: ~20 ms; cold: one `sea-lite` spawn bounded by `scope_timeout` s (4). A missing binary, an older sea-lite without the subcommand, a crash or a timeout **fail open** and are logged once. |
+
+Detection: sea-lite is "configured" when `.mcp.json`, `~/.claude.json` or an
+enabled `sea-lite*` plugin mentions it (`CC_ANCHOR_SEA=1|0` overrides), same
+as kronicle-lite. The CLIs are found via `CC_ANCHOR_KRONICLE_LITE_BIN` /
+`CC_ANCHOR_SEA_LITE_BIN`, then `PATH`, then the plugin cache
+(`~/.claude/plugins/cache/*/<name>/*/node_modules/<name>/dist/cli.js`, which is
+where the isokron plugins pin the packages). `/cc-anchor:anchor doctor` prints
+what it found.
+
+### Claim tracking
+
+Hooks cannot call MCP tools, but they see every MCP result. The PostToolUse
+hook matches `^mcp__.*__sea_(claim|next|create|release|transition|refresh)$`
+(a bash regex — every other tool call pays nothing) and folds the result into
+`.claude/cc-anchor/claims.json` with one `jq` run of `scripts/claims.jq`:
+
+| Tool result | Effect on `claims[ticket_id]` |
+| :- | :- |
+| `sea_claim` → `{claims:[{ticket_id, claim_token, expires_at}]}` | add each |
+| `sea_next` → `{ticket:{id}, claim_token, expires_at}` | add when `ticket` is not null |
+| `sea_create` with `claim_seconds` → `{ticket:{id}, claim_token, claim_expires_at}` | add when `claim_token` is not null |
+| `sea_refresh` → `{expires_at}` | bump `expires` |
+| `sea_release` (input `ticket_id`) | drop — ids may be ≥ 8-char prefixes, so prefix match |
+| `sea_transition` with `to` ∈ `resolved\|wont_fix\|duplicate\|dropped\|merged` | drop (terminal states release the claim) |
+| any result carrying `error` | no change |
+
+Each entry records `agent_id` (the common input field Claude Code sets inside
+a subagent), `session_id`, `cwd` (so a removed worktree can find its claims)
+and the lease expiry; expired entries are dropped on every update and never
+count as live. `/cc-anchor:anchor claims` lists them.
+
+### `type: "mcp_tool"` hooks — what the reference allows
+
+The hooks reference documents `{"type":"mcp_tool","server":…,"tool":…,"input":{…}}`
+and we checked whether the orient step could be that hook instead of shell
+glue. It cannot, for three documented reasons:
+
+1. `SessionStart` **at launch** (and `--continue`/`--resume`) fires before MCP
+   servers exist; Claude Code skips `mcp_tool` hooks there and logs
+   `mcp_tool hooks are not available for the 'SessionStart' hook event`. They
+   run only on the `compact` / `clear` re-fire.
+2. `input` string values template only `${path}` fields **of the hook's own
+   JSON input**. The cursor is on disk, not in the SessionStart payload, so
+   `since_cursor` cannot be passed — the call would always be a cold orient.
+3. The call is not a model tool call, so PostToolUse never sees the returned
+   cursor, and the `server` name is per-user (`kronicle-lite` for a user
+   server, `plugin:kronicle-lite:kronicle-lite` for the plugin-bundled one);
+   a plugin cannot ship one without producing a hook error for everyone whose
+   server has another name or none.
+
+So the shell path stays primary. If you want the cold briefing injected
+automatically after compactions anyway:
+
+```
+/cc-anchor:anchor hooks install orient-mcp --server kronicle-lite
+```
+
+writes this to `~/.claude/settings.json` (matcher `compact|clear`, the tool's
+text output is added to context exactly like command-hook stdout):
+
+```json
+{ "type": "mcp_tool", "server": "kronicle-lite", "tool": "get_system_state",
+  "input": { "focus": "orientation", "budget_tokens": 1500 }, "timeout": 30 }
+```
+
+The same limits rule out `mcp_tool` for `sea_release` on SubagentStop (the
+token is not in the input) and for `sea_transition` on TaskCompleted (ticket id
+and token are not in the input), which is why those go through the queue file
+and the library respectively.
+
+### Belt and braces after a compaction
+
+`SessionStart(compact)` is the only event with a context channel after a
+compaction: `InstructionsLoaded` has none (its JSON is discarded),
+`PostCompact` discards output, `PreCompact` can only block. So
+`SessionStart(compact)` stamps `compact_injected_count` in `state.json`;
+`InstructionsLoaded(compact)` compares it with `compact_count` (counts, not
+timestamps — all three hooks can land in the same second) and, if the
+injection did not happen (a timed-out hook, a failed hook group, a race),
+sets `reassert_pending`. The next `UserPromptSubmit` injects the card once
+under `ANCHOR — verbatim … (re-asserted …)` and clears the flag.
+
+Measured on Claude Code 2.1.316: a **plugin's** `InstructionsLoaded` hook does
+not fire for `load_reason: session_start` (the eager CLAUDE.md load precedes
+plugin registration, the ordering the reference also documents for
+`WorktreeCreate` with `--tmux`); a settings-file hook does. Lazy loads
+(`nested_traversal`, `path_glob_match`, `include`) reach the plugin hook, so the
+matcher includes them and the `Instructions:` line on the card lists what was
+loaded lazily. To stamp the eager load too, copy the hook into
+`~/.claude/settings.json`.
+
+### Worktree pack (opt-in, not in `hooks.json`)
+
+A `WorktreeCreate` hook *replaces* Claude Code's git behaviour entirely and
+must print the created path or creation fails — a plugin that registered it
+for everyone would hijack every `--worktree`, `EnterWorktree` and
+`isolation: "worktree"` call. So it is a pack you install into settings:
+
+```
+/cc-anchor:anchor hooks install worktree
+```
+
+`worktree-create.sh` reproduces the documented default (`.claude/worktrees/<name>`
+on branch `worktree-<name>` from `HEAD`, `.worktreeinclude` copies), then adds a
+`WorktreeCreate <name>` breadcrumb, records the worktree in `state.json` and
+copies the card into the worktree's `.claude/` so a session launched inside
+it is anchored too. `worktree-remove.sh` queues a pending release for every
+live claim taken while `cwd` was inside the worktree, removes the directory
+(`git worktree remove --force`, then `rm -rf`) and deletes the branch, as the
+reference asks. `cwd` follows Claude into the worktree while
+`$CLAUDE_PROJECT_DIR` — and the card — stay in the main checkout.
+
+### Runtime files
+
+`.claude/cc-anchor/` gains `claims.json`, `pending-release.jsonl`,
+`scope-cache.json`, `tasks.json` (task id → ticket id), `log` and `once/`
+(rate-limit latches). All regenerable; keep the directory in `.gitignore`.
+
+## Cursor
+
+Cursor's hooks (`.cursor/hooks.json`, `version: 1`) speak a different dialect:
+`workspace_roots[]` instead of a project dir, `tool_output` as a JSON string,
+MCP tools named `MCP:<tool>`, `stop` answered with `followup_message`,
+`sessionStart` with `additional_context`. `cursor/adapter.sh` rewrites each
+Cursor payload into the Claude Code shape, runs the same scripts, and rewrites
+the answer back.
+
+Install (project scope — the file is meant to be committed; `--scope user`
+writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
+
+```sh
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.2.0/scripts/anchor.mjs cursor install
+# or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
+```
+
+This copies `adapter.sh` + `scripts/` to `.cursor/hooks/cc-anchor/` and merges
+these entries into `.cursor/hooks.json` (existing hooks are kept):
+
+| Cursor event | → script | Notes |
+| :- | :- | :- |
+| `sessionStart` | `session-start.sh` (source `startup`) | card injected as `additional_context` |
+| `preCompact` | `pre-compact.sh` | card written, `compacted_at` stamped |
+| `postToolUse` | `post-tool-use.sh` | trail + claim tracking; `MCP:sea_claim` → `mcp__cursor__sea_claim` |
+| `preToolUse` (matcher `Write`) | `pre-tool-use.sh` | scope guard → `{"permission":"deny","agent_message":…}` |
+| `stop` (`loop_limit: 2`) | `stop.sh` | `decision: block` → `followup_message`; `loop_count > 0` → `stop_hook_active` |
+| `subagentStop` (`loop_limit: 2`) | `subagent-stop.sh` | see gaps |
+
+Reload the Cursor window; `cursor uninstall` removes only our entries.
+
+**Parity gaps** (from Cursor's reference): there is no post-compaction
+session-start, so the card cannot be re-injected automatically after a
+compaction — `preCompact` writes it and the next `sessionStart` (new
+conversation) injects it; `beforeSubmitPrompt` has no context output, so the
+bare word `anchor` cannot re-ground; `subagentStop` carries no subagent id,
+so claims cannot be attributed to the stopping subagent (the adapter runs the
+hook with an empty id and it stays silent); `stop` carries no assistant
+text, so the session document holds the card only; `InstructionsLoaded`,
+`TaskCreated/Completed` and the worktree events have no Cursor equivalent.
+Plugin hooks in Cursor are command-only, which is all we use.
+
 ## Why not just a PreCompact hook that writes SESSION.md?
 
 Because the hooks reference gives `PreCompact` no context channel — only
@@ -201,22 +390,38 @@ files instead of guessing.
 | `CC_ANCHOR_KRONICLE` | auto | `1`/`0` forces kronicle-lite detection |
 | `CC_ANCHOR_STOP_WARN` | `1` | `0` disables the Stop-hook nudge |
 | `CC_ANCHOR_COLOR` | `1` | `0` disables ANSI colour in the status line |
+| `CC_ANCHOR_SEA` | auto | `1`/`0` forces sea-lite detection |
+| `CC_ANCHOR_CLAIM_GUARD`, `…_SESSION_DOC`, `…_SUBAGENT_RELEASE`, `…_TASK_MIRROR`, `…_TASK_MIRROR_GATE`, `…_SCOPE_GUARD`, `…_SCOPE_TTL`, `…_SCOPE_TIMEOUT` | see pack table | Environment form of the `cc-anchor.json` switches |
+| `CC_ANCHOR_KRONICLE_LITE_BIN`, `CC_ANCHOR_SEA_LITE_BIN` | auto | Path to the CLI (binary or `dist/cli.js`) |
+| `CC_ANCHOR_KRONICLE_DATA_DIR` | — | `--data-dir` for `kronicle-lite put` (defaults to the server's `~/.kronicle-lite`) |
+| `CC_ANCHOR_SEA_MODULE`, `CC_ANCHOR_SEA_DATA_DIR` | auto | sea-lite package path / data dir for the task mirror (`KRONICLE_LITE_DATA_DIR` is honoured too) |
+| `CC_ANCHOR_SYNC` | `0` | `1` runs the session-document put inline instead of in the background (tests) |
 
 Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ## Development
 
 ```sh
-npm test                    # node:test, 42 tests, no dependencies
+npm test                    # node:test, 71 tests, no dependencies
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```
 
 Layout: `hooks/hooks.json` → `scripts/*.sh` (bash + jq, fail-open) →
-`scripts/render.jq` (the one renderer) ← `scripts/anchor.mjs` (CLI, edits
-the top section only) ← `skills/anchor/SKILL.md` (the slash command and the
-discipline). Tests feed the scripts the exact JSON shapes from the Claude
-Code hooks reference (`tests/fixtures/`).
+`scripts/render.jq` (the one renderer) + `scripts/claims.jq` (the claim state
+machine) ← `scripts/anchor.mjs` (CLI, edits the top section only, installs
+the packs) ← `skills/anchor/SKILL.md` (the slash command and the discipline).
+`scripts/task-mirror.mjs` is the only hook that needs Node (task mirror,
+opt-in). `cursor/` holds the Cursor adapter. Tests feed the scripts the exact
+JSON shapes from the Claude Code hooks reference and Cursor's hooks page
+(`tests/fixtures/`); `tests/fixtures/fake-sea-lite/` is a file-backed double
+of the sea-lite library surface the mirror uses, and the same test also runs
+against the real package when it is installed.
+
+Headless proofs: `demo/headless-proof.sh` (the compaction bracket, 0.1.0)
+and `demo/headless-proof-lifecycle.sh` (Stop claim guard + a tool call,
+0.2.0) stream every `hook_response` from `claude -p --output-format
+stream-json --verbose`.
 
 ## License
 

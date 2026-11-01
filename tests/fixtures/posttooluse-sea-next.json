@@ -1,0 +1,16 @@
+{
+  "session_id": "abc123",
+  "cwd": "/Users/...",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__plugin_sea-lite_sea-lite__sea_next",
+  "tool_input": { "lease_seconds": 300 },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"ticket\": { \"id\": \"tkt_01J0NEXT00000000000000000A\", \"title\": \"Wire the webhook\", \"status\": \"in_progress\" },\n  \"claim_token\": \"clm_next_1234567890abcdef\",\n  \"expires_at\": \"2099-01-01T00:05:00Z\",\n  \"reason\": null,\n  \"considered\": 3,\n  \"head\": { \"seq\": 43, \"hash\": \"cafebabe\" }\n}"
+      }
+    ]
+  },
+  "tool_use_id": "toolu_01NEXT"
+}

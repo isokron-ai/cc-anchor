@@ -12,9 +12,14 @@
  *   anchor.mjs cursor                        print detected cursor + kronicle status
  *   anchor.mjs statusline install [--force|--append] [--scope user|project]
  *   anchor.mjs statusline snippet | uninstall
- *   anchor.mjs doctor [--probe]              paths, deps, hooks, kronicle
+ *   anchor.mjs doctor [--probe]              paths, deps, hooks, kronicle, sea-lite, config
  *   anchor.mjs render                        regenerate the trail section
  *   anchor.mjs paths [--json]                resolved file locations
+ *   anchor.mjs config [show|set K V|unset K] [--scope project|user]   lifecycle-pack switches
+ *   anchor.mjs claims [--json]               live sea-lite claims + pending releases
+ *   anchor.mjs hooks install|uninstall orient-mcp --server NAME [--scope]   optional mcp_tool orient hook
+ *   anchor.mjs hooks install|uninstall worktree [--scope]                   WorktreeCreate/Remove pack
+ *   anchor.mjs cursor install|uninstall [--scope project|user]            Cursor hooks.json port
  *
  * No runtime dependencies. Node >= 18. The card format and the trail
  * renderer live in scripts/lib.sh (one renderer, shared with the hooks);
@@ -34,6 +39,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LIB_SH = path.join(__dirname, 'lib.sh');
 const STATUSLINE_SH = path.join(__dirname, 'statusline.sh');
 const RENDER_JQ = path.join(__dirname, 'render.jq');
+const CURSOR_DIR = path.join(__dirname, '..', 'cursor');
+/** Files the hook scripts need next to lib.sh when copied out of the plugin. */
+const SHELL_RUNTIME = ['lib.sh', 'render.jq', 'claims.jq'];
 
 export const MARKER = '<!-- cc-anchor:trail -->';
 export const VERSION_LINE =
@@ -83,7 +91,251 @@ export function resolvePaths(rootArg, env = process.env) {
     trail: path.join(run, 'trail.jsonl'),
     state: path.join(run, 'state.json'),
     cursorFile: path.join(run, 'cursor'),
+    config: path.join(dir, 'cc-anchor.json'),
+    configHome: path.join(home, '.claude', 'cc-anchor', 'config.json'),
+    claims: path.join(run, 'claims.json'),
+    pending: path.join(run, 'pending-release.jsonl'),
+    log: path.join(run, 'log'),
   };
+}
+
+// ───────────────────────────── config (lifecycle pack switches) ─────────────────────────────
+
+/** Every switch the hooks read, with its default and the hook that honours it. */
+export const CONFIG_KEYS = {
+  claim_guard: { default: false, hook: 'Stop', doc: 'block the stop once while a sea-lite claim is live (needs sea-lite)' },
+  session_doc: { default: false, hook: 'Stop', doc: 'put_document session-<date>-<id> (card + last message) via the kronicle-lite CLI' },
+  subagent_release: { default: 'auto', hook: 'SubagentStop', doc: 'block the subagent once + queue pending releases for its claims (auto = when sea-lite is configured)' },
+  task_mirror: { default: false, hook: 'TaskCreated/TaskCompleted', doc: 'mirror Claude Code tasks into sea-lite tickets (idempotency key cc-task:<id>)' },
+  task_mirror_gate: { default: true, hook: 'TaskCompleted', doc: 'with task_mirror: block completion while the ticket has open predecessors' },
+  scope_guard: { default: false, hook: 'PreToolUse', doc: 'deny Edit/Write inside another actor\'s live claim scope (sea-lite scope-check)' },
+  scope_ttl: { default: 30, hook: 'PreToolUse', doc: 'seconds a scope verdict is cached per path' },
+  scope_timeout: { default: 4, hook: 'PreToolUse', doc: 'seconds to wait for sea-lite scope-check before failing open' },
+};
+
+export function readConfig(p) {
+  const home = readJson(p.configHome, {});
+  const proj = readJson(p.config, {});
+  const out = {};
+  for (const k of Object.keys(CONFIG_KEYS)) {
+    const envName = `CC_ANCHOR_${k.toUpperCase()}`;
+    if (process.env[envName] !== undefined && process.env[envName] !== '') out[k] = { value: process.env[envName], via: 'env' };
+    else if (proj[k] !== undefined) out[k] = { value: proj[k], via: p.config };
+    else if (home[k] !== undefined) out[k] = { value: home[k], via: p.configHome };
+    else out[k] = { value: CONFIG_KEYS[k].default, via: 'default' };
+  }
+  return out;
+}
+
+function coerce(v) {
+  if (/^(true|1|yes|on)$/i.test(v)) return true;
+  if (/^(false|0|no|off)$/i.test(v)) return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v;
+}
+
+function cmdConfig(p, rest, flags) {
+  const [sub = 'show', key, ...valParts] = rest;
+  const file = flags.scope === 'user' ? p.configHome : p.config;
+  if (sub === 'show') {
+    const c = readConfig(p);
+    if (flags.json) return console.log(JSON.stringify(Object.fromEntries(Object.entries(c).map(([k, v]) => [k, v.value])), null, 2));
+    console.log(`config files: ${p.config} (project) · ${p.configHome} (user) · env CC_ANCHOR_<KEY> wins`);
+    for (const [k, v] of Object.entries(c)) console.log(`${k.padEnd(18)} ${String(v.value).padEnd(6)} ${v.via === 'default' ? '(default)' : `← ${v.via}`}   ${CONFIG_KEYS[k].doc}`);
+    return;
+  }
+  if (!key || !(key in CONFIG_KEYS)) throw new Error(`usage: config set|unset <${Object.keys(CONFIG_KEYS).join('|')}> [value] [--scope project|user]`);
+  const cur = readJson(file, {});
+  if (sub === 'set') {
+    const raw = valParts.join(' ');
+    if (!raw) throw new Error(`usage: config set ${key} <value>`);
+    cur[key] = coerce(raw);
+  } else if (sub === 'unset') {
+    delete cur[key];
+  } else throw new Error('usage: config [show|set K V|unset K]');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cur, null, 2) + '\n');
+  console.log(`${key} ${sub === 'set' ? `= ${JSON.stringify(cur[key])}` : 'unset'} in ${file}`);
+}
+
+// ───────────────────────────── sea-lite / claims ─────────────────────────────
+
+export function seaConfigured(p, env = process.env) {
+  if (env.CC_ANCHOR_SEA === '1') return { configured: true, via: 'env' };
+  if (env.CC_ANCHOR_SEA === '0') return { configured: false, via: 'env' };
+  const home = env.HOME || os.homedir();
+  const hit = (s) => /sea[-_]lite/i.test(String(s));
+  const serversHit = (servers) => Object.entries(servers || {}).some(([k, v]) => hit(k) || hit(v?.command || '') || (v?.args || []).some(hit));
+  for (const f of [path.join(p.root, '.mcp.json'), path.join(home, '.claude.json')]) {
+    const j = readJson(f, null);
+    if (j && (serversHit(j.mcpServers) || serversHit(j.projects?.[p.root]?.mcpServers))) return { configured: true, via: f };
+  }
+  for (const f of [path.join(home, '.claude', 'settings.json'), path.join(p.root, '.claude', 'settings.json'), path.join(p.root, '.claude', 'settings.local.json')]) {
+    const j = readJson(f, null);
+    if (j && Object.entries(j.enabledPlugins || {}).some(([k, v]) => /^sea[-_]lite/i.test(k) && v === true)) return { configured: true, via: f };
+  }
+  return { configured: false, via: null };
+}
+
+/** Where the kronicle-lite / sea-lite CLI would be run from (mirror of lib.sh::cc_find_cli). */
+export function findCli(name, env = process.env) {
+  const envName = `CC_ANCHOR_${name.toUpperCase().replace(/-/g, '_')}_BIN`;
+  if (env[envName]) return env[envName];
+  const onPath = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8', env }).stdout.trim();
+  if (onPath) return onPath;
+  const home = env.HOME || os.homedir();
+  const cache = path.join(home, '.claude', 'plugins', 'cache');
+  const dirs = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
+  for (const mk of dirs(cache)) for (const plug of dirs(path.join(cache, mk))) for (const ver of dirs(path.join(cache, mk, plug))) {
+    const f = path.join(cache, mk, plug, ver, 'node_modules', name, 'dist', 'cli.js');
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}
+
+function liveClaims(p) {
+  const j = readJson(p.claims, { claims: {} });
+  const now = nowIso();
+  return Object.entries(j.claims || {}).map(([ticket_id, v]) => ({ ticket_id, ...v })).filter((c) => (c.expires || '') > now);
+}
+function pendingReleases(p) {
+  if (!fs.existsSync(p.pending)) return [];
+  const live = new Set(liveClaims(p).map((c) => c.ticket_id));
+  return fs.readFileSync(p.pending, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e && live.has(e.ticket_id));
+}
+
+function cmdClaims(p, flags) {
+  const live = liveClaims(p);
+  const pending = pendingReleases(p);
+  if (flags.json) return console.log(JSON.stringify({ live, pending }, null, 2));
+  if (!live.length) return console.log('no live sea-lite claims recorded (claims.json is filled from sea_claim / sea_next / sea_create results seen by the PostToolUse hook)');
+  for (const c of live) console.log(`${c.ticket_id}  held by ${c.agent ? `subagent ${c.agent}` : 'main agent'}  via ${c.via}  expires ${c.expires}${pending.some((e) => e.ticket_id === c.ticket_id) ? '  [PENDING RELEASE]' : ''}`);
+}
+
+// ───────────────────────────── hook packs (settings.json) ─────────────────────────────
+
+const PACK_TAG = 'cc-anchor-pack';
+
+function installRuntimeCopy(env = process.env) {
+  const home = env.HOME || os.homedir();
+  const installDir = path.join(home, '.claude', 'cc-anchor');
+  fs.mkdirSync(installDir, { recursive: true });
+  for (const f of [...SHELL_RUNTIME, 'worktree-create.sh', 'worktree-remove.sh']) {
+    const dst = path.join(installDir, f);
+    fs.copyFileSync(path.join(__dirname, f), dst);
+    fs.chmodSync(dst, 0o755);
+  }
+  return installDir;
+}
+
+/**
+ * The optional `type: "mcp_tool"` orient hook, exactly per the hooks
+ * reference "MCP tool hook fields": {server, tool, input}. Matcher is
+ * compact|clear because the reference says SessionStart at launch fires
+ * before MCP servers exist and skips mcp_tool hooks. No since_cursor: the
+ * `input` field can only template ${fields} of the hook's own JSON input,
+ * and the cursor is on disk, not in the SessionStart payload.
+ */
+export function orientMcpHook(server) {
+  return {
+    SessionStart: [{
+      matcher: 'compact|clear',
+      hooks: [{ type: 'mcp_tool', server, tool: 'get_system_state', input: { focus: 'orientation', budget_tokens: 1500 }, timeout: 30, statusMessage: 'cc-anchor: orienting against kronicle-lite' }],
+    }],
+  };
+}
+
+export function worktreePackHooks(installDir) {
+  return {
+    WorktreeCreate: [{ hooks: [{ type: 'command', command: 'bash', args: [path.join(installDir, 'worktree-create.sh')], timeout: 60 }] }],
+    WorktreeRemove: [{ hooks: [{ type: 'command', command: 'bash', args: [path.join(installDir, 'worktree-remove.sh')], timeout: 60 }] }],
+  };
+}
+
+function tagGroups(hooksObj, pack) {
+  for (const groups of Object.values(hooksObj)) for (const g of groups) g[PACK_TAG] = pack;
+  return hooksObj;
+}
+
+export function hooksInstall(p, pack, { scope = 'user', server, env = process.env } = {}) {
+  let add;
+  if (pack === 'orient-mcp') {
+    if (!server) throw new Error('hooks install orient-mcp needs --server <mcp server name> (bare key for a user/project server, "plugin:kronicle-lite:kronicle-lite" for the plugin-bundled one)');
+    add = orientMcpHook(server);
+  } else if (pack === 'worktree') {
+    add = worktreePackHooks(installRuntimeCopy(env));
+  } else throw new Error('packs: orient-mcp, worktree');
+  const sp = settingsPath(scope, p, env);
+  const settings = readJson(sp, {});
+  settings.hooks = settings.hooks || {};
+  for (const [ev, groups] of Object.entries(tagGroups(add, pack))) {
+    settings.hooks[ev] = (settings.hooks[ev] || []).filter((g) => g[PACK_TAG] !== pack).concat(groups);
+  }
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+  return { settings: sp, events: Object.keys(add) };
+}
+
+export function hooksUninstall(p, pack, { scope = 'user', env = process.env } = {}) {
+  const sp = settingsPath(scope, p, env);
+  const settings = readJson(sp, {});
+  let removed = 0;
+  for (const ev of Object.keys(settings.hooks || {})) {
+    const before = settings.hooks[ev].length;
+    settings.hooks[ev] = settings.hooks[ev].filter((g) => g[PACK_TAG] !== pack);
+    removed += before - settings.hooks[ev].length;
+    if (!settings.hooks[ev].length) delete settings.hooks[ev];
+  }
+  if (settings.hooks && !Object.keys(settings.hooks).length) delete settings.hooks;
+  fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+  return { settings: sp, removed };
+}
+
+// ───────────────────────────── Cursor port ─────────────────────────────
+
+const CURSOR_EVENTS = ['sessionStart', 'preCompact', 'postToolUse', 'preToolUse', 'stop', 'subagentStop'];
+
+export function cursorInstall(p, { scope = 'project', env = process.env } = {}) {
+  const home = env.HOME || os.homedir();
+  const base = scope === 'user' ? path.join(home, '.cursor') : path.join(p.root, '.cursor');
+  const dest = path.join(base, 'hooks', 'cc-anchor');
+  fs.mkdirSync(path.join(dest, 'scripts'), { recursive: true });
+  fs.copyFileSync(path.join(CURSOR_DIR, 'adapter.sh'), path.join(dest, 'adapter.sh'));
+  fs.chmodSync(path.join(dest, 'adapter.sh'), 0o755);
+  for (const f of fs.readdirSync(__dirname)) {
+    if (!/\.(sh|jq|mjs)$/.test(f)) continue;
+    fs.copyFileSync(path.join(__dirname, f), path.join(dest, 'scripts', f));
+    fs.chmodSync(path.join(dest, 'scripts', f), 0o755);
+  }
+  // Project hooks run from the project root; user hooks from ~/.cursor/ (Cursor docs).
+  const rel = scope === 'user' ? './hooks/cc-anchor/adapter.sh' : '.cursor/hooks/cc-anchor/adapter.sh';
+  const template = readJson(path.join(CURSOR_DIR, 'hooks.json'), { version: 1, hooks: {} });
+  const hf = path.join(base, 'hooks.json');
+  const existing = readJson(hf, { version: 1, hooks: {} });
+  existing.version = existing.version || 1;
+  existing.hooks = existing.hooks || {};
+  for (const ev of CURSOR_EVENTS) {
+    const mine = (template.hooks[ev] || []).map((h) => ({ ...h, command: `bash ${rel} ${ev}` }));
+    existing.hooks[ev] = (existing.hooks[ev] || []).filter((h) => !/cc-anchor\/adapter\.sh/.test(h.command || '')).concat(mine);
+  }
+  fs.writeFileSync(hf, JSON.stringify(existing, null, 2) + '\n');
+  return { hooksFile: hf, dest, events: CURSOR_EVENTS };
+}
+
+export function cursorUninstall(p, { scope = 'project', env = process.env } = {}) {
+  const home = env.HOME || os.homedir();
+  const base = scope === 'user' ? path.join(home, '.cursor') : path.join(p.root, '.cursor');
+  const hf = path.join(base, 'hooks.json');
+  const existing = readJson(hf, null);
+  if (existing?.hooks) {
+    for (const ev of Object.keys(existing.hooks)) {
+      existing.hooks[ev] = existing.hooks[ev].filter((h) => !/cc-anchor\/adapter\.sh/.test(h.command || ''));
+      if (!existing.hooks[ev].length) delete existing.hooks[ev];
+    }
+    fs.writeFileSync(hf, JSON.stringify(existing, null, 2) + '\n');
+  }
+  fs.rmSync(path.join(base, 'hooks', 'cc-anchor'), { recursive: true, force: true });
+  return { hooksFile: hf };
 }
 
 // ───────────────────────────── card parse / render ─────────────────────────────
@@ -290,7 +542,7 @@ export function statuslineInstall(p, { force = false, append = false, scope = 'u
   const home = env.HOME || os.homedir();
   const installDir = path.join(home, '.claude', 'cc-anchor');
   fs.mkdirSync(installDir, { recursive: true });
-  for (const f of [STATUSLINE_SH, LIB_SH, RENDER_JQ]) {
+  for (const f of [STATUSLINE_SH, LIB_SH, RENDER_JQ, ...SHELL_RUNTIME.map((n) => path.join(__dirname, n))]) {
     const dst = path.join(installDir, path.basename(f));
     fs.copyFileSync(f, dst);
     fs.chmodSync(dst, 0o755);
@@ -424,6 +676,8 @@ function cmdDoctor(p, flags) {
   const hooks = readJson(path.join(__dirname, '..', 'hooks', 'hooks.json'), {});
   const events = Object.keys(hooks.hooks || {});
   const k = kronicleConfigured(p);
+  const sea = seaConfigured(p);
+  const cfg = readConfig(p);
   const cur = detectCursor(p);
   const rows = [
     ['root', p.root],
@@ -434,7 +688,12 @@ function cmdDoctor(p, flags) {
     ['jq', has('jq') ? 'ok' : 'MISSING — hooks fail open (do nothing) until jq is installed'],
     ['hooks.json events', events.join(', ') || 'none'],
     ['kronicle-lite', `${k.configured}${k.via ? ` via ${k.via}` : ''}`],
+    ['kronicle-lite cli', findCli('kronicle-lite') || 'not found (session_doc needs it)'],
+    ['sea-lite', `${sea.configured}${sea.via ? ` via ${sea.via}` : ''}`],
+    ['sea-lite cli', findCli('sea-lite') || 'not found (scope_guard needs it)'],
     ['cursor', cur ? `${cur.cursor} (${cur.source})` : 'none'],
+    ['config', Object.entries(cfg).filter(([, v]) => v.via !== 'default').map(([k2, v]) => `${k2}=${v.value}`).join(' ') || 'all defaults (lifecycle pack off)'],
+    ['live claims', `${liveClaims(p).length} (${pendingReleases(p).length} pending release)`],
   ];
   if (flags.probe) {
     const pr = probeMcpList();
@@ -455,7 +714,7 @@ function parseArgs(argv) {
     if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=');
       if (v !== undefined) flags[k] = v;
-      else if (['root', 'scope'].includes(k)) flags[k] = argv[++i];
+      else if (['root', 'scope', 'server'].includes(k)) flags[k] = argv[++i];
       else flags[k] = true;
     } else pos.push(a);
   }
@@ -474,10 +733,23 @@ export function main(argv = process.argv.slice(2)) {
     case 'add-invariant': return cmdAddInvariant(p, rest.join(' '));
     case 'rm-invariant': return cmdRmInvariant(p, rest.join(' '));
     case 'refresh': return cmdRefresh(p);
-    case 'cursor': return cmdCursor(p, flags);
     case 'render': { render(p); console.log(`rendered ${p.card}`); return; }
     case 'paths': return console.log(flags.json ? JSON.stringify(p, null, 2) : Object.entries(p).map(([k, v]) => `${k.padEnd(10)} ${v}`).join('\n'));
     case 'doctor': return cmdDoctor(p, flags);
+    case 'config': return cmdConfig(p, rest, flags);
+    case 'claims': return cmdClaims(p, flags);
+    case 'hooks': {
+      const [sub, pack] = rest;
+      if (sub === 'install') { const r = hooksInstall(p, pack, { scope: flags.scope || 'user', server: flags.server }); console.log(`${pack} pack installed in ${r.settings} (${r.events.join(', ')}). Restart Claude Code to load it.`); return; }
+      if (sub === 'uninstall') { const r = hooksUninstall(p, pack, { scope: flags.scope || 'user' }); console.log(`${pack}: removed ${r.removed} hook group(s) from ${r.settings}`); return; }
+      throw new Error('usage: hooks install|uninstall orient-mcp --server NAME | worktree  [--scope user|project]');
+    }
+    case 'cursor-port': case 'cursor': {
+      if (cmd === 'cursor' && !['install', 'uninstall'].includes(rest[0])) return cmdCursor(p, flags);
+      const [sub] = rest;
+      if (sub === 'install') { const r = cursorInstall(p, { scope: flags.scope || 'project' }); console.log(`Cursor hooks installed: ${r.hooksFile}\n  scripts: ${r.dest}\n  events: ${r.events.join(', ')}\nReload the Cursor window (or reopen the project) to pick them up.`); return; }
+      const r = cursorUninstall(p, { scope: flags.scope || 'project' }); console.log(`Cursor hooks removed from ${r.hooksFile}`); return;
+    }
     case 'statusline': {
       const sub = rest[0] || 'snippet';
       if (sub === 'snippet') return console.log(JSON.stringify(statuslineSnippet(), null, 2));
@@ -495,9 +767,9 @@ export function main(argv = process.argv.slice(2)) {
       throw new Error('usage: statusline snippet|install [--force|--append] [--scope user|project]|uninstall');
     }
     case 'help': case '--help': case '-h':
-      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map((l) => l.replace(/^ \*\s?/, '')).join('\n'));
+      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 27).map((l) => l.replace(/^ \*\s?/, '')).join('\n'));
     default:
-      throw new Error(`unknown command: ${cmd} (try: show, set goal, set project, add-invariant, rm-invariant, refresh, cursor, statusline install, doctor)`);
+      throw new Error(`unknown command: ${cmd} (try: show, set goal, set project, add-invariant, rm-invariant, refresh, cursor, config, claims, hooks install, cursor install, statusline install, doctor)`);
   }
 }
 

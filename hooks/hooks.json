@@ -1,5 +1,5 @@
 {
-  "description": "cc-anchor: keeps a <=25-line anchor card (goal, invariants, tool-call breadcrumbs, kronicle cursor) on disk and re-injects it verbatim after every compaction.",
+  "description": "cc-anchor: keeps a <=25-line anchor card (goal, invariants, tool-call breadcrumbs, kronicle cursor) on disk and re-injects it verbatim after every compaction. 0.2.0 adds the lifecycle pack: sea-lite claim tracking + Stop/SubagentStop guards, kronicle-lite session documents, a PreToolUse scope guard, a Task→ticket mirror and an InstructionsLoaded stamp. Everything beyond the card is opt-in via cc-anchor.json / CC_ANCHOR_* and inert without kronicle-lite / sea-lite.",
   "hooks": {
     "PreCompact": [
       {
@@ -22,6 +22,32 @@
             "type": "command",
             "command": "bash",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "matcher": "session_start|compact|nested_traversal|path_glob_match|include",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/instructions-loaded.sh"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.sh"],
             "timeout": 10
           }
         ]
@@ -52,6 +78,42 @@
         ]
       }
     ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/task-created.sh"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/task-completed.sh"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.sh"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -59,7 +121,7 @@
             "type": "command",
             "command": "bash",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/stop.sh"],
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh sessionStart", "timeout": 10 }],
+    "preCompact":   [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh preCompact", "timeout": 10 }],
+    "postToolUse":  [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh postToolUse", "timeout": 5 }],
+    "preToolUse":   [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh preToolUse", "matcher": "Write", "timeout": 10 }],
+    "stop":         [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh stop", "timeout": 10, "loop_limit": 2 }],
+    "subagentStop": [{ "command": "bash .cursor/hooks/cc-anchor/adapter.sh subagentStop", "timeout": 5, "loop_limit": 2 }]
+  }
+}

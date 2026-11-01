@@ -5,14 +5,23 @@
     "url": "https://isokron.ai"
   },
   "description": "cc-anchor: a Claude Code plugin whose anchor card (goal, invariants, breadcrumbs, cursor) survives context compaction. This repository is its own marketplace.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "plugins": [
     {
       "name": "cc-anchor",
       "source": "./",
-      "description": "Anchor card that survives context compaction: written to disk on PreCompact, re-injected verbatim on SessionStart(compact), plus a drift statusline. Works without kronicle-lite; with it, re-presents your cursor.",
+      "description": "Anchor card that survives context compaction: written to disk on PreCompact, re-injected verbatim on SessionStart(compact), plus a drift statusline. Works without kronicle-lite; with it, re-presents your cursor. 0.2.0: opt-in lifecycle hooks pack (sea-lite claim guards, kronicle-lite session documents, scope guard, task mirror) and a Cursor hooks port.",
       "category": "productivity",
-      "tags": ["compaction", "context", "hooks", "statusline", "session-state", "kronicle-lite"]
+      "tags": [
+        "compaction",
+        "context",
+        "hooks",
+        "statusline",
+        "session-state",
+        "kronicle-lite",
+        "sea-lite",
+        "lifecycle"
+      ]
     }
   ]
 }

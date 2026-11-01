@@ -81,7 +81,8 @@ def captured:
     | map(select(. != "")) | .[0] // "" ) as $cursor
 | ( ($trail | split("\n") | map(select(. != "")) | map(try fromjson catch empty))
     + (if $e == null then [] else [$e] end) ) as $entries
-| (4 + (if $cursor != "" then 1 else 0 end)) as $fixed
+| (($st.instructions_files // "") | if . == "" then "" else "Instructions: \(.) (loaded \($st.instructions_loaded_at // "?"), \($st.instructions_reason // "?"))" end) as $instr
+| (4 + (if $cursor != "" then 1 else 0 end) + (if $instr != "" then 1 else 0 end)) as $fixed
 | ([ ($n | tonumber), (25 - ($top | length) - $fixed) ] | min | if . < 1 then 1 else . end) as $take
 | ($entries | .[-$take:] | reverse) as $shown
 | ($st + { top_hash: $hash, refreshed_at: $refreshed }) as $state2
@@ -93,6 +94,7 @@ def captured:
       + ( if ($shown | length) == 0 then ["- (no tool calls recorded yet)"]
           else ($shown | map("- \(.ts) \(.tool)" + (if .target == "" then "" else " \(.target)" end))) end )
       + ( if $cursor != "" then ["Cursor: \($cursor)"] else [] end )
+      + ( if $instr != "" then [$instr] else [] end )
       + [ "Compacted: \($st.compacted_at // "never")",
           "Refreshed: \($refreshed // "never")" ]
       | join("\n") )

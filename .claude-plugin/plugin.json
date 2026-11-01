@@ -1,8 +1,8 @@
 {
   "name": "cc-anchor",
   "displayName": "cc-anchor",
-  "version": "0.1.0",
-  "description": "An anchor card that survives context compaction: goal, invariants, recent tool-call breadcrumbs and your kronicle-lite cursor, written to disk before every compaction and re-injected verbatim after it. Ships a drift statusline.",
+  "version": "0.2.0",
+  "description": "An anchor card that survives context compaction: goal, invariants, recent tool-call breadcrumbs and your kronicle-lite cursor, written to disk before every compaction and re-injected verbatim after it. Ships a drift statusline and an opt-in lifecycle hooks pack for kronicle-lite / sea-lite (claim guards, session documents, scope guard, task mirror) with a Cursor port.",
   "author": {
     "name": "Joshua Bryan",
     "url": "https://isokron.ai"
@@ -18,7 +18,10 @@
     "session-state",
     "anchor",
     "kronicle-lite",
-    "drift"
+    "drift",
+    "sea-lite",
+    "lifecycle",
+    "cursor"
   ],
   "icon": "./assets/icon.png",
   "documentationUrl": "https://github.com/rafe-walker/cc-anchor#readme",

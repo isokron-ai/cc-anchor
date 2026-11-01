@@ -3,3 +3,4 @@ node_modules/
 .claude/anchor.md
 *.tmp.*
 .DS_Store
+.cursor/hooks/cc-anchor/

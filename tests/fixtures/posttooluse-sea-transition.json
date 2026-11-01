@@ -1,0 +1,11 @@
+{
+  "session_id": "abc123",
+  "cwd": "/Users/...",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__sea-lite__sea_transition",
+  "tool_input": { "ticket_id": "tkt_01J0NEXT00000000000000000A", "claim_token": "clm_next_1234567890abcdef", "to": "resolved" },
+  "tool_response": {
+    "content": [ { "type": "text", "text": "{\n  \"ticket_id\": \"tkt_01J0NEXT00000000000000000A\",\n  \"from\": \"in_progress\",\n  \"to\": \"resolved\",\n  \"claim_released\": true,\n  \"head\": { \"seq\": 45, \"hash\": \"0badf00d\" }\n}" } ]
+  },
+  "tool_use_id": "toolu_01TRN"
+}

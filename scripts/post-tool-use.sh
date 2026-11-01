@@ -15,6 +15,13 @@
 # Extra, WITH kronicle-lite: when the tool is mcp__*__get_system_state the
 # cursor in tool_response is captured to <run>/cursor so SessionStart can
 # re-present it as since_cursor after the next compaction.
+#
+# Extra, WITH sea-lite (0.2.0): when the tool is mcp__*__sea_{claim,next,
+# create,release,transition,refresh} the claim tokens in tool_response are
+# folded into <run>/claims.json (scripts/claims.jq), keyed by ticket and
+# tagged with the agent_id the hook fired in. That file is what the Stop /
+# SubagentStop guards and the pending-release surfacing read. The branch is
+# a bash regex on tool_name, so every other tool call pays nothing.
 set -u
 CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HERE=.
 # shellcheck source=./lib.sh
@@ -32,4 +39,5 @@ if [[ -z "$root" && "$input" =~ \"cwd\":[[:space:]]*\"([^\"]*)\" ]]; then root="
 cc_resolve "${root:-$PWD}"
 
 cc_render "$input"
+cc_claims_update "$input"
 exit 0

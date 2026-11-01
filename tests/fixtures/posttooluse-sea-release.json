@@ -1,0 +1,11 @@
+{
+  "session_id": "abc123",
+  "cwd": "/Users/...",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__sea-lite__sea_release",
+  "tool_input": { "ticket_id": "tkt_01HZX4K3Q9R8M2N7P6V5W4X3Y2", "claim_token": "clm_9f8e7d6c5b4a3928", "note": "half done; see PR #12" },
+  "tool_response": {
+    "content": [ { "type": "text", "text": "{\n  \"ticket_id\": \"tkt_01HZX4K3Q9R8M2N7P6V5W4X3Y2\",\n  \"released\": true,\n  \"head\": { \"seq\": 44, \"hash\": \"feedface\" }\n}" } ]
+  },
+  "tool_use_id": "toolu_01REL"
+}

@@ -1,0 +1,14 @@
+{
+  "conversation_id": "conv-456",
+  "generation_id": "gen-4",
+  "model": "claude-opus-4-7-thinking-max",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/project"],
+  "user_email": null,
+  "transcript_path": null,
+  "tool_name": "Write",
+  "tool_input": { "file_path": "/project/src/a.ts", "content": "x" },
+  "tool_use_id": "abc124",
+  "cwd": "/project"
+}

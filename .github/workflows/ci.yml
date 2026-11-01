@@ -27,6 +27,14 @@ jobs:
           for i in 1 2 3; do echo "$payload" | bash scripts/post-tool-use.sh; done
           start=$(date +%s%N); for i in $(seq 10); do echo "$payload" | bash scripts/post-tool-use.sh; done; end=$(date +%s%N)
           echo "PostToolUse mean: $(( (end - start) / 10000000 )) ms"
+          pre='{"session_id":"ci","cwd":"/tmp/proj","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/tmp/proj/src/a.ts","old_string":"a","new_string":"b"}}'
+          start=$(date +%s%N); for i in $(seq 10); do echo "$pre" | bash scripts/pre-tool-use.sh; done; end=$(date +%s%N)
+          echo "PreToolUse (scope guard off) mean: $(( (end - start) / 10000000 )) ms"
+          printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/sea-lite && chmod +x /tmp/sea-lite
+          export CC_ANCHOR_SCOPE_GUARD=1 CC_ANCHOR_SEA_LITE_BIN=/tmp/sea-lite
+          echo "$pre" | bash scripts/pre-tool-use.sh
+          start=$(date +%s%N); for i in $(seq 10); do echo "$pre" | bash scripts/pre-tool-use.sh; done; end=$(date +%s%N)
+          echo "PreToolUse (scope guard on, cached verdict) mean: $(( (end - start) / 10000000 )) ms"
           cat /tmp/proj/.claude/anchor.md
 
   validate:

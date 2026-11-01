@@ -9,6 +9,25 @@
 # On other sources the card (if one exists) is injected under a softer
 # header so a resumed/forked/cleared session also starts anchored.
 #
+# 0.2.0 additions:
+#   * stamps state.compact_injected_at on source=compact (the
+#     InstructionsLoaded(compact) hook checks it: if this hook did not run
+#     for the latest compaction, the next prompt re-asserts the card);
+#   * surfaces pending sea-lite releases (claims a stopped subagent or a
+#     removed worktree left behind) as explicit sea_release calls;
+#   * on resume/fork, relays the reference's cost fields
+#     (seconds_since_last_response, prompt_cache_likely_expired) as a drift
+#     signal — a free "your notes are N hours old" line.
+#
+# Why no `type: "mcp_tool"` orient here: that hook type exists and can call
+# get_system_state, but (1) Claude Code skips mcp_tool hooks on SessionStart
+# at launch (no MCP client yet) — they only run on compact/clear; (2) its
+# `input` can template only `${fields}` of the hook's own JSON input, and the
+# cursor lives on disk, so since_cursor cannot be passed; (3) the result is
+# not a model tool call, so PostToolUse never sees the new cursor. The shell
+# path below stays primary; `anchor.mjs hooks install orient-mcp --server X`
+# adds an optional cold-orient mcp_tool hook for compact|clear in settings.
+#
 # Input (stdin, per hooks reference "SessionStart input"):
 #   { session_id, transcript_path, cwd, hook_event_name:"SessionStart",
 #     source:"startup"|"resume"|"clear"|"compact"|"fork", model?, … }
@@ -22,8 +41,8 @@ CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HE
 cc_have_jq || exit 0
 
 input="$(cat 2>/dev/null || true)"
-source_kind="$(jq -r '.source // "startup"' <<<"$input" 2>/dev/null || echo startup)"
-cwd="$(jq -r '.cwd // empty' <<<"$input" 2>/dev/null || true)"
+IFS=$'\x1f' read -r source_kind cwd secs cache_expired < <(jq -r '[(.source // "startup"), (.cwd // ""), ((.seconds_since_last_response // "") | tostring), ((.prompt_cache_likely_expired // "") | tostring)] | map(gsub("[\\x1f\\n]"; " ")) | join("\u001f")' <<<"$input" 2>/dev/null) || { source_kind=startup; cwd=""; secs=""; cache_expired=""; }
+source_kind="${source_kind:-startup}"
 
 cc_resolve "${CLAUDE_PROJECT_DIR:-${cwd:-$PWD}}"
 
@@ -34,6 +53,7 @@ fi
 
 # Make sure the generated section (cursor/compacted/refreshed) is current.
 cc_render
+if [[ "$source_kind" == "compact" ]]; then cc_state_set compact_injected_at "$(cc_now)" compact_injected_count "$(cc_state_get compact_count)" reassert_pending 0; fi
 
 card=""
 [[ -s "$CC_CARD" ]] && card="$(cat "$CC_CARD")"
@@ -58,6 +78,19 @@ ctx="${header}
 ${card}
 
 ${discipline}"
+
+if [[ "$source_kind" == "resume" || "$source_kind" == "fork" ]] && [[ -n "${secs:-}" && "$secs" =~ ^[0-9]+$ ]]; then
+  ctx="${ctx}
+- Resumed after $(( secs / 60 )) min idle${cache_expired:+ (prompt cache likely expired: ${cache_expired})}: every state-claim in the resumed transcript is as-of then; re-read files before acting on them."
+fi
+
+pending="$(cc_pending_live)"
+if [[ -n "$pending" && "$pending" != "[]" ]]; then
+  ctx="${ctx}
+
+Pending sea-lite releases (claims left behind by a stopped subagent or removed worktree; still live). Release them before taking new work:
+$(cc_claims_lines "$pending")"
+fi
 
 if cc_kronicle_configured; then
   if cursor="$(cc_detect_cursor)"; then

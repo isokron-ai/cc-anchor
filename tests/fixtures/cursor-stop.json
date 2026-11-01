@@ -1,0 +1,12 @@
+{
+  "conversation_id": "conv-456",
+  "generation_id": "gen-5",
+  "model": "claude-opus-4-7-thinking-max",
+  "hook_event_name": "stop",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/project"],
+  "user_email": null,
+  "transcript_path": null,
+  "status": "completed",
+  "loop_count": 0
+}
