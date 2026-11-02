@@ -106,7 +106,8 @@ gate() {
   : > "$CC_KL_B.wcattempt" 2>/dev/null || true
   if [[ "$mode" == warn ]]; then
     cc_log "pulse: warned before \`${head:0:60}\` ($1)"
-    cc_emit_context PreToolUse "cc-anchor pulse (warn): \`${head}\` is about to run ${4:-but} $2
+    local sep=", but"; [[ "${4:-}" == while ]] && sep=" while"
+    cc_emit_context PreToolUse "cc-anchor pulse (warn): \`${head}\` is about to run${sep} $2
 Check that this command uses the current values; if not, stop and re-run it with them."
   else
     cc_log "pulse: denied \`${head:0:60}\` ($1)"
