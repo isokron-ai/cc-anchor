@@ -1249,17 +1249,27 @@ cc_bg_enabled() {
     *) if [[ ! -s "$CC_CLAIMS" ]] && ! cc_sea_configured; then : > "$CC_BG_B.off"; return 1; fi;;
   esac
   if ! cc_find_cli sea-lite >/dev/null; then
-    : > "$CC_BG_B.off"
+    : > "$CC_BG_B.off"; : > "$CC_BG_B.nobin"
     cc_log_once bg_nobin "bash_guard: sea-lite CLI not found; Bash-changed paths are not checked against claims"
     return 1
   fi
   : > "$CC_BG_B.on"
 }
 
-cc_bg_tid() {  # <payload> — sanitized tool_use_id ("" when absent)
+# 0 when the Bash payload's command starts background work: a `&` that is
+# not part of && |& >& &>, or nohup / setsid / disown. jq only when the
+# payload contains one of them at all.
+cc_bg_starts_job() {
+  [[ "$1" == *'&'* || "$1" =~ (nohup|setsid|disown) ]] || return 1
+  local bc; bc="$(jq -r '.tool_input.command // "" | tostring' <<<"$1" 2>/dev/null)"
+  [[ "$bc" =~ (^|[^\&\|\>])\&([^\&\>]|$) || "$bc" =~ (^|[^A-Za-z0-9_-])(nohup|setsid|disown)([^A-Za-z0-9_-]|$) ]]
+}
+
+cc_bg_tid() {  # <payload> — sanitized tool_use_id ("notid" when absent: one
+  # stamp per session then, so overlapping id-less calls share it)
   local t=""
   [[ "$1" =~ \"tool_use_id\":[[:space:]]*\"([^\"]*)\" ]] && t="${BASH_REMATCH[1]}"
-  t="${t//[^A-Za-z0-9_-]/}"; printf '%s' "${t:0:64}"
+  t="${t//[^A-Za-z0-9_-]/}"; t="${t:0:64}"; printf '%s' "${t:-notid}"
 }
 
 # PreToolUse(Bash): stamp the start of THIS call (one builtin write).
@@ -1272,6 +1282,39 @@ cc_bg_prestamp() {  # <payload>
   [[ -n "$tid" ]] || return 0
   [[ -d "$CC_BG_D" ]] || mkdir -p "$CC_BG_D" 2>/dev/null || return 0
   : > "$CC_BG_B.pre.$tid" 2>/dev/null || true
+  if cc_bg_starts_job "$payload"; then : > "$CC_BG_B.bgjob.$tid" 2>/dev/null || true; fi
+  # 0.5.1 (H2-18): which claimed paths exist right now (builtins), so a path
+  # removed through its parent (rm -rf src, mv src x, a checkout) is known
+  # to have existed before this call.
+  if [[ -s "$CC_BG_D/claims.tsv" ]]; then
+    local ses path rest; local -a ex=()
+    while IFS=$'\x1f' read -r ses path rest; do [[ -n "$path" && -e "$path" ]] && ex+=("$path"); done < "$CC_BG_D/claims.tsv"
+    if (( ${#ex[@]} > 0 )); then printf '%s\n' "${ex[@]}" > "$CC_BG_B.present.$tid" 2>/dev/null || true; fi
+  fi
+}
+
+# 0.5.1 (H2-20/H2-22): when sea-lite cannot answer, the claim guards fail
+# open — and say so ONCE per outage per session (the Edit/Write scope guard
+# and the Bash guard share the latch <run>/sea-advised.<sid8>), like the
+# kronicle-lite "feed offline" advisory. cc_sea_advise <session> <why> sets
+# CC_SEA_ADVICE and returns 0 when the agent should be told now.
+CC_SEA_ADVICE=""
+cc_sea_advise() {
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  local latch="$CC_RUN/sea-advised.${s:-nosession}"
+  CC_SEA_ADVICE=""
+  [[ -e "$latch" ]] && return 1
+  cc_ensure_dirs || return 1
+  : > "$latch" 2>/dev/null || return 1
+  cc_log "sea-lite unavailable (${2}); advised the agent once"
+  CC_SEA_ADVICE="cc-anchor: sea-lite is not answering right now (${2}). The claim guards are NOT checking your edits against other agents' sea-lite claims until it does (the Edit/Write scope guard allows every edit; the Bash guard uses the last claims it saw, if any). Check \`sea-lite board\` yourself before editing files another agent may hold."
+  return 0
+}
+cc_sea_recovered() {
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  [[ -e "$CC_RUN/sea-advised.${s:-nosession}" ]] || return 0
+  rm -f "$CC_RUN/sea-advised.${s:-nosession}" 2>/dev/null
+  cc_log "sea-lite answering again; claim guards checking"
 }
 
 cc_bg_seadb() { printf '%s' "${CC_ANCHOR_SEA_DATA_DIR:-${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}}/kronicle-lite.db"; }
@@ -1282,22 +1325,32 @@ cc_bg_refresh() {
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_BG_D/claims.at" 2>/dev/null || return 1
   # Drop per-call stamps whose PostToolUse never came (older than 10 min).
-  find "$CC_BG_D" -maxdepth 1 -name '*.pre.*' -mmin +10 -exec rm -f {} + 2>/dev/null || true
-  local bin to out rc
-  bin="$(cc_find_cli sea-lite)" || { : > "$CC_BG_D/claims.tsv"; return 1; }
+  find "$CC_BG_D" -maxdepth 1 \( -name '*.pre.*' -o -name '*.present.*' -o -name '*.bgjob.*' \) -mmin +10 -exec rm -f {} + 2>/dev/null || true
+  local bin to out rc ttl
+  bin="$(cc_find_cli sea-lite)" || { printf '127\n' > "$CC_BG_D/claims.degraded"; return 1; }
   to="$(cc_cfg_raw scope_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=4
   local -a args=(board --json)
   [[ -n "${CC_ANCHOR_SEA_DATA_DIR:-}" ]] && args+=(--data-dir "$CC_ANCHOR_SEA_DATA_DIR")
   if [[ "$bin" == *.js || "$bin" == *.mjs ]]; then out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" node "$bin" "${args[@]}" 2>/dev/null)"; rc=$?
   else out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" "$bin" "${args[@]}" 2>/dev/null)"; rc=$?; fi
+  if (( rc != 0 )) || [[ -z "$out" ]] || [[ "$out" != *'"tickets"'* ]]; then
+    # 0.5.1 (H2-20): one slow or failed board call no longer empties the
+    # cache for bash_guard_ttl. The last good claims stay in use (their age
+    # is in claims.good), the next refresh is tried after 5 s, and the agent
+    # is told once per outage (cc_sea_advise) that the guard is degraded.
+    # With no good claims to fall back on, the next call retries at once.
+    ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
+    local wait=5; [[ -e "$CC_BG_D/claims.good" ]] || wait=1   # nothing to fall back on: retry at once
+    printf '%s\n' "$((now - ttl + wait))" > "$CC_BG_D/claims.at" 2>/dev/null || true
+    printf '%s\n' "$rc" > "$CC_BG_D/claims.degraded" 2>/dev/null || true
+    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); using the last claims seen, retrying in 5 s"
+    return 1
+  fi
   # The board call itself may write the store: stamp the cache AFTER it, so
   # only a later write (a new claim by anyone) looks newer.
   : > "$CC_BG_D/claims.stamp" 2>/dev/null || true
-  if (( rc != 0 )) || [[ -z "$out" ]]; then
-    : > "$CC_BG_D/claims.tsv"
-    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); not checking until the next refresh"
-    return 1
-  fi
+  rm -f "$CC_BG_D/claims.degraded" 2>/dev/null
+  printf '%s\n' "$now" > "$CC_BG_D/claims.good" 2>/dev/null || true
   # sea-lite reports the project by its physical path (macOS: /private/var/…
   # for /var/…); rewrite it to this hook's spelling of the root so finds and
   # messages use the paths the agent sees.
@@ -1313,16 +1366,74 @@ cc_bg_refresh() {
 
 # 0 when the claims cache must be refreshed (builtins only).
 cc_bg_stale() {
-  [[ -e "$CC_BG_D/claims.tsv" && -e "$CC_BG_D/claims.stamp" ]] || return 0
+  [[ -e "$CC_BG_D/claims.at" ]] || return 0
   local ttl at=0 now; ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
   cc_epoch_now_var now
   [[ -s "$CC_BG_D/claims.at" ]] && IFS= read -r at < "$CC_BG_D/claims.at"
   [[ "$at" =~ ^[0-9]+$ ]] || at=0
   (( now - at >= ttl )) && return 0
+  [[ -e "$CC_BG_D/claims.stamp" ]] || return 1   # never filled; failed < 5 s ago
   local db; db="$(cc_bg_seadb)"
   [[ -e "$db" && "$db" -nt "$CC_BG_D/claims.stamp" ]] && return 0
   [[ -e "$db-wal" && "$db-wal" -nt "$CC_BG_D/claims.stamp" ]] && return 0
   return 1
+}
+
+# cc_bg_late <PostToolUse payload, any tool> — 0.5.1 (H2-19): after a Bash
+# call that started background work, report claimed paths of OTHER
+# sessions that changed since the last look (the job's writes land after
+# PostToolUse of the call that started it). For a Bash call, only up to its
+# own start (cc_bg_check reports the call itself). Sets CC_BG_LATE.
+CC_BG_LATE=""
+cc_bg_late() {
+  local payload="$1" sid="" upper="" tid
+  CC_BG_LATE=""
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  cc_bg_session "$sid"
+  [[ -e "$CC_BG_B.bgwatch" ]] || return 0
+  if [[ -n "$(find "$CC_BG_B.bgwatch" -mmin +10 -print 2>/dev/null)" ]]; then rm -f "$CC_BG_B.bgwatch" 2>/dev/null; return 0; fi
+  [[ -s "$CC_BG_D/claims.tsv" ]] || return 0
+  if [[ "$payload" =~ \"tool_name\":[[:space:]]*\"Bash\" ]]; then
+    tid="$(cc_bg_tid "$payload")"; [[ -n "$tid" && -e "$CC_BG_B.pre.$tid" ]] && upper="$CC_BG_B.pre.$tid"
+  fi
+  local me ov iso ses path holder ticket title exp; me="$sid"; ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && me="$ov"
+  cc_now_var iso
+  local -a cl=() paths=()
+  while IFS=$'\x1f' read -r ses path holder ticket title exp; do
+    [[ -n "$path" && "$ses" != "$me" ]] || continue
+    [[ -z "$exp" || "$exp" > "$iso" ]] || continue
+    cl+=("${path}"$'\x1f'"${holder}"$'\x1f'"${ticket}"$'\x1f'"${title}"$'\x1f'"${exp}")
+    [[ -e "$path" ]] && paths+=("$path")
+  done < "$CC_BG_D/claims.tsv"
+  (( ${#paths[@]} > 0 )) || return 0
+  local hits
+  if [[ -n "$upper" ]]; then
+    hits="$(cc_with_timeout 5 find "${paths[@]}" \( -name .git -o -name node_modules \) -prune -o -type f \( -newer "$CC_BG_B.bgwatch" -o -cnewer "$CC_BG_B.bgwatch" \) ! -newer "$upper" -print 2>/dev/null)"
+    touch -r "$upper" "$CC_BG_B.bgwatch" 2>/dev/null || true
+  else
+    hits="$(cc_with_timeout 5 find "${paths[@]}" \( -name .git -o -name node_modules \) -prune -o -type f \( -newer "$CC_BG_B.bgwatch" -o -cnewer "$CC_BG_B.bgwatch" \) -print 2>/dev/null)"
+    : > "$CC_BG_B.bgwatch" 2>/dev/null || true
+  fi
+  [[ -n "$hits" ]] || return 0
+  local out="" n=0 h c cpath
+  while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    cpath=""
+    for c in "${cl[@]}"; do
+      IFS=$'\x1f' read -r path holder ticket title exp <<<"$c"
+      if [[ "$h" == "$path" || "$h" == "$path/"* ]]; then cpath="$path"; break; fi
+    done
+    [[ -n "$cpath" ]] || continue
+    n=$((n + 1)); (( n <= 10 )) || continue
+    out="${out}
+- ${h#"$CC_ROOT"/} — held by ${holder}, ticket ${ticket} \"${title}\" (locks ${cpath#"$CC_ROOT"/}; expires ${exp:-?})"
+  done <<<"$hits"
+  (( n > 0 )) || return 0
+  (( n > 10 )) && out="${out}
+- … and $((n - 10)) more"
+  CC_BG_LATE="cc-anchor bash guard: since an earlier Bash call of yours started background work, ${n} path(s) inside live sea-lite claims held by OTHER sessions changed after that call returned (by your background job, or by the holder):${out}
+If your background job wrote there, stop it and undo the change unless you agreed it with the holder."
+  cc_log "bash_guard: ${n} late change(s) inside other sessions' claims after background work"
 }
 
 # PostToolUse(Bash): sets CC_BG_CONTEXT (empty: say nothing).
@@ -1332,26 +1443,89 @@ cc_bg_check() {
   [[ "$payload" =~ \"tool_name\":[[:space:]]*\"Bash\" ]] || return 0
   [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
   cc_bg_session "$sid"
+  if [[ -e "$CC_BG_B.nobin" ]]; then
+    rm -f "$CC_BG_B.nobin" 2>/dev/null
+    cc_sea_advise "$sid" "the sea-lite CLI was not found" && CC_BG_CONTEXT="$CC_SEA_ADVICE"
+  fi
   [[ -e "$CC_BG_B.off" ]] && return 0
   cc_bg_enabled || return 0
   tid="$(cc_bg_tid "$payload")"
   [[ -n "$tid" ]] || return 0
   pre="$CC_BG_B.pre.$tid"
   [[ -e "$pre" ]] || return 0
+  # 0.5.1 (H2-19): this call started background work (`… &`, nohup,
+  # setsid, disown): watch the claims for writes that land AFTER it returned
+  # (cc_bg_late, on the following tool calls, for up to 10 minutes). The
+  # watch starts at this call's own start: a slow PostToolUse must not
+  # hide a write that lands while it runs.
+  if [[ -e "$CC_BG_B.bgjob.$tid" ]] || cc_bg_starts_job "$payload"; then
+    touch -r "$pre" "$CC_BG_B.bgwatch" 2>/dev/null || : > "$CC_BG_B.bgwatch" 2>/dev/null || true
+  fi
+  rm -f "$CC_BG_B.bgjob.$tid" 2>/dev/null
   if cc_bg_stale; then cc_bg_refresh || true; fi
-  [[ -s "$CC_BG_D/claims.tsv" ]] || return 0
+  local advice=""
+  if [[ -s "$CC_BG_D/claims.degraded" ]]; then
+    local drc="" good="" nowd age="never"; IFS= read -r drc < "$CC_BG_D/claims.degraded"
+    [[ -s "$CC_BG_D/claims.good" ]] && IFS= read -r good < "$CC_BG_D/claims.good"
+    cc_epoch_now_var nowd; [[ "$good" =~ ^[0-9]+$ ]] && age="$((nowd - good)) s ago"
+    cc_sea_advise "$sid" "sea-lite board $([[ "$drc" == 124 ]] && echo "timed out" || echo "failed (exit $drc)"); the Bash guard is using the claims it last saw ($age)" && advice="$CC_SEA_ADVICE"
+  elif [[ -e "$CC_BG_D/claims.good" ]]; then
+    cc_sea_recovered "$sid"
+  fi
+  [[ -s "$CC_BG_D/claims.tsv" ]] || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; rm -f "$pre" 2>/dev/null; return 0; }
   local me ov; me="$sid"; ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && me="$ov"
+  # 0.5.1 (H2-24b): a claim of THIS session is someone else's work too when
+  # a different agent of the session took it — a subagent editing the main
+  # agent's claim or a sibling's. Known from claims.json (claims taken
+  # through the sea_* MCP tools, tagged with the agent_id); a claim of this
+  # session that claims.json does not know is treated as the main agent's.
+  local myagent; myagent="$(cc_payload_agent "$payload")"
+  local owners=""
+  if [[ -s "$CC_CLAIMS" ]] && grep -Fq -- "$me" "$CC_BG_D/claims.tsv" 2>/dev/null; then
+    owners="$(jq -r --arg s "$sid" '(.claims // {}) | to_entries[] | select((.value.session // "") == $s) | "\(.key[0:8])\u001f\(.value.agent // "")"' "$CC_CLAIMS" 2>/dev/null)"
+  fi
   local iso; cc_now_var iso
-  local ses path holder ticket title exp
-  local -a cl=() paths=() gone=()
+  local ses path holder ticket title exp prevp="" owner
+  if [[ -s "$CC_BG_B.present.$tid" ]]; then prevp="$(cat "$CC_BG_B.present.$tid" 2>/dev/null)"
+  elif [[ -s "$CC_BG_B.present" ]]; then prevp="$(cat "$CC_BG_B.present" 2>/dev/null)"; fi
+  rm -f "$CC_BG_B.present.$tid" 2>/dev/null
+  local -a cl=() paths=() gone=() present=()
   while IFS=$'\x1f' read -r ses path holder ticket title exp; do
-    [[ -n "$path" && "$ses" != "$me" ]] || continue
+    [[ -n "$path" ]] || continue
+    if [[ "$ses" == "$me" ]]; then
+      owner=""
+      if [[ -n "$owners" ]]; then
+        local ot oa
+        while IFS=$'\x1f' read -r ot oa; do [[ "$ot" == "$ticket" ]] && { owner="$oa"; break; }; done <<<"$owners"
+      fi
+      [[ "$owner" == "$myagent" ]] && continue
+      holder="${holder} — your own session's $([[ -n "$owner" ]] && printf 'subagent %s' "$owner" || printf 'main agent')"
+    fi
     [[ -z "$exp" || "$exp" > "$iso" ]] || continue
     cl+=("${path}"$'\x1f'"${holder}"$'\x1f'"${ticket}"$'\x1f'"${title}"$'\x1f'"${exp}")
-    if [[ -e "$path" || -L "$path" ]]; then paths+=("$path")
-    elif [[ -d "${path%/*}" ]] && ! [[ "${path%/*}" -ot "$pre" ]]; then gone+=("$path (removed)"); fi
+    if [[ -e "$path" || -L "$path" ]]; then paths+=("$path"); present+=("$path")
+    elif [[ -d "${path%/*}" ]] && ! [[ "${path%/*}" -ot "$pre" ]]; then gone+=("$path (removed)")
+    else
+      # 0.5.1 (H2-18): gone through an ancestor (rm -rf src, mv src x, a
+      # checkout without src/): the nearest directory that still exists
+      # changed during this call, and the path existed before it (seen at
+      # PreToolUse or at the last check; else git knew it: in the index, or
+      # in the commit HEAD was on before a checkout).
+      local anc="${path%/*}" was=0 relp="${path#"$CC_ROOT"/}"
+      while [[ -n "$anc" && ! -d "$anc" ]]; do anc="${anc%/*}"; done
+      if [[ -n "$anc" ]] && ! [[ "$anc" -ot "$pre" ]]; then
+        if [[ -n "$prevp" ]]; then grep -Fxq -- "$path" <<<"$prevp" && was=1
+        elif [[ "$relp" != "$path" ]] && command -v git >/dev/null 2>&1; then
+          if [[ -n "$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout 3 git ls-files -- "$relp" 2>/dev/null | head -1)" ]]; then was=1
+          elif (cd "$CC_ROOT" 2>/dev/null && cc_with_timeout 3 git cat-file -e "HEAD@{1}:$relp" 2>/dev/null); then was=1; fi
+        fi
+      fi
+      (( was )) && gone+=("$path (removed)")
+    fi
   done < "$CC_BG_D/claims.tsv"
-  (( ${#cl[@]} > 0 )) || { rm -f "$pre" 2>/dev/null; return 0; }
+  if (( ${#present[@]} > 0 )); then printf '%s\n' "${present[@]}" > "$CC_BG_B.present" 2>/dev/null || true
+  else rm -f "$CC_BG_B.present" 2>/dev/null; fi
+  (( ${#cl[@]} > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; rm -f "$pre" 2>/dev/null; return 0; }
   # One find over the claimed paths: modified OR status-changed after the stamp.
   local hits="" rc=0 note=""
   if (( ${#paths[@]} > 0 )); then
@@ -1383,7 +1557,7 @@ cc_bg_check() {
     done
   fi
   found+=(${gone[@]+"${gone[@]}"})
-  (( ${#found[@]} > 0 )) || return 0
+  (( ${#found[@]} > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; return 0; }
   # Drop git-ignored files (build output) with one bounded `git status`.
   local ignored=""
   if command -v git >/dev/null 2>&1; then
@@ -1395,11 +1569,6 @@ cc_bg_check() {
   for h in "${found[@]}"; do
     bare="${h% (entries added, removed or renamed)}"; bare="${bare% (removed)}"; bare="${bare%/}"
     rel="${h#"$CC_ROOT"/}"
-    if [[ -n "$ignored" ]]; then
-      local skip=0 ig
-      while IFS= read -r ig; do [[ -n "$ig" && ( "${bare#"$CC_ROOT"/}" == "${ig%/}" || "${bare#"$CC_ROOT"/}" == "${ig%/}"/* ) ]] && { skip=1; break; }; done <<<"$ignored"
-      (( skip )) && continue
-    fi
     # Which claim covers it (first match).
     holder="?"; ticket="?"; title=""; exp=""; cpath=""
     for c in "${cl[@]}"; do
@@ -1407,6 +1576,18 @@ cc_bg_check() {
       if [[ "$bare" == "$path" || "$bare" == "$path/"* ]]; then cpath="$path"; break; fi
     done
     [[ -n "$cpath" ]] || continue
+    # Git-ignored output (build artefacts) inside a claim is dropped — unless
+    # the claim itself is on an ignored path (0.5.1, H2-24a: config/, .env …).
+    if [[ -n "$ignored" ]]; then
+      local skip=0 ig crel="${cpath#"$CC_ROOT"/}"
+      while IFS= read -r ig; do
+        [[ -n "$ig" ]] || continue
+        ig="${ig%/}"
+        [[ "$crel" == "$ig" || "$crel" == "$ig"/* ]] && continue   # ignore covers the whole claim
+        [[ "${bare#"$CC_ROOT"/}" == "$ig" || "${bare#"$CC_ROOT"/}" == "$ig"/* ]] && { skip=1; break; }
+      done <<<"$ignored"
+      (( skip )) && continue
+    fi
     n=$((n + 1))
     (( shown < 10 )) || continue
     shown=$((shown + 1))
@@ -1414,9 +1595,10 @@ cc_bg_check() {
     out="${out}
 - ${rel} — held by ${holder}, ticket ${ticket} \"${title}\" (locks ${l2}; expires ${exp:-?})"
   done
-  (( n > 0 )) || return 0
+  (( n > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; return 0; }
   (( n > shown )) && out="${out}
 - … and $((n - shown)) more"
+  [[ -n "$advice" ]] && note="${note} (sea-lite board is not answering: checked against the claims last seen)"
   CC_BG_CONTEXT="cc-anchor bash guard: that Bash call changed ${n} path(s) inside live sea-lite claims held by OTHER sessions${note}:${out}
 Those paths are another agent's work in progress. Undo your change (git checkout -- <path>, or delete the new file) unless you agreed it with the holder; the Edit/Write scope guard does not see Bash edits."
   cc_log "bash_guard: ${n} path(s) inside other sessions' claims after Bash"

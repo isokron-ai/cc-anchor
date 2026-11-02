@@ -181,7 +181,8 @@ test('scope guard: a sea-lite older than 0.4.0 (no JSON contract) fails open and
     fs.writeFileSync(old, `#!/usr/bin/env bash\necho 'invalid_input: scope path "/x" must be repo-relative, not absolute' >&2\nexit 1\n`);
     fs.chmodSync(old, 0o755);
     const r = hook('pre-tool-use.sh', fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/a.ts` } }), sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: old });
-    assert.equal(r.stdout, '');
+    assert.equal(r.json?.hookSpecificOutput?.permissionDecision, undefined, 'fails open');
+    assert.match(r.json?.hookSpecificOutput?.additionalContext ?? '', /claim guards are NOT checking/, 'and says so to the agent, once');
     assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /older than 0\.4\.0/);
   } finally { sb.cleanup(); }
 });

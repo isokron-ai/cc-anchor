@@ -153,7 +153,7 @@ if run warn; then setup; export CC_ANCHOR_PULSE_MODE=warn; o=$(pulse "git push")
 
 # --- round 2, part 2 (agent-memory-bench 386db8c): back-off, offline, subagent stop/resume, ack
 if run backoff; then WRAP=1 setup  # klpend cached with count 0 (before the change); store now has pending 1
-  touch "$W/slow"; t0=$(date +%s%N); hook post-tool-use.sh PostToolUse >/dev/null; t=$(( ($(date +%s%N)-t0)/1000000 )); rm -f "$W/slow"
+  touch "$W/slow"; t0=$(date +%s); hook post-tool-use.sh PostToolUse >/dev/null; t=$(( ($(date +%s)-t0)*1000 )); rm -f "$W/slow"
   echo "     one slow read: post-tool-use ${t} ms (push_timeout 3 s); store healthy again, pending(agent-a)=$(pend)"
   expect_deny "H2-11: deploy within 60 s of ONE slow read (store healthy again, pending 1)" "git push"; done_; fi
 if run backoff_broken; then WRAP=1 setup; touch "$W/slow"; hook post-tool-use.sh PostToolUse >/dev/null; rm -f "$W/slow"; touch "$W/broken"

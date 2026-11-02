@@ -78,6 +78,33 @@ The gate no longer tries to find dangerous commands in shell text.
   project path and by its physical (symlink-resolved) path (also for
   sea-lite detection).
 
+### Fixed — sea-lite claim guards
+- **H2-21 / H2-23 (cc-anchor side)**: the Edit/Write scope guard's verdict
+  cache is dropped when the sea-lite store changes (a new claim by anyone),
+  and a timeout, crash, missing CLI, answer without the JSON contract or an
+  `exit 2` other than `outside_repo` is never cached as "ok" (it fails open
+  for that edit only).
+- **H2-22**: when sea-lite is unavailable the claim guards still fail open,
+  but now tell the agent once per outage (shared latch for the scope guard
+  and the Bash guard), like the kronicle-lite "feed offline" advisory.
+- **H2-20**: one slow `sea-lite board` call no longer empties the Bash
+  guard's claim cache for `bash_guard_ttl`: the last good claims stay in
+  use, the next refresh is tried after 5 s (at once when there are none),
+  and the agent is told the guard is degraded.
+- **H2-18**: a claimed path removed through its parent (`rm -rf src`,
+  `mv src src-old`, `git checkout` of a branch without `src/`) is reported
+  when it existed before the call (seen at PreToolUse, at the last check,
+  or known to git).
+- **H2-19**: writes that land after a Bash call that started background
+  work (`&`, `nohup`, `setsid`, `disown`) are reported at the following
+  tool calls (up to 10 minutes).
+- **H2-24**: a claim on a git-ignored path is reported (only ignored output
+  *inside* a claim is dropped); a subagent editing a claim its own session's
+  main agent or a sibling took (known from the `sea_*` results; a CLI claim
+  of the session counts as the main agent's) is warned.
+- A Bash payload without `tool_use_id` is checked against a per-session
+  stamp instead of skipped.
+
 ### Documentation
 - README: the gate, the read-only allowlist, fail-closed rules, and what is
   out of scope (H2-06: git indirection, quoted code arguments, functions /
@@ -93,6 +120,9 @@ The gate no longer tries to find dangerous commands in shell text.
   open, 100 KB command, warn mode; from 386db8c: `backoff`, `offline`,
   `substop_pending`, plus `backoff_broken` and `ack`) runs from
   `tests/stress.test.mjs` against the real kronicle-lite 0.8.0.
+- `tests/stress/bash-guard.sh` (round 1), `bash-guard2.sh` and
+  `scope-guard.sh` (round 2) against the real sea-lite CLI (Linux), plus
+  unit tests for the scope guard cache and advisory.
 - `tests/stress/pulse-corpus.sh` (85 cases) and `pulse-corpus2.sh` (125)
   under 0.5.1 rules: no world-changing case reads as read-only, harmless
   reads stay read-only; run from `tests/push.test.mjs` with new

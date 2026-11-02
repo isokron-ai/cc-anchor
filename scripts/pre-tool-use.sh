@@ -31,7 +31,10 @@
 #   exit 2  → {error, details:{reason}}: reason "outside_repo" => allow
 #             quietly; anything else => FAIL OPEN, logged once.
 #   other / no JSON contract (sea-lite < 0.4.0) / missing binary / timeout
-#           → FAIL OPEN, logged once, "ok" cached for the TTL.
+#           → FAIL OPEN for this edit only (never cached: 0.5.1, H2-21/H2-23),
+#             logged once, and the agent is told ONCE per outage that the
+#             claim guards are not checking (additionalContext; H2-22).
+# Cached verdicts are dropped when the sea-lite store changes (any new claim).
 # Identity: the session comes from the hook input's session_id (config
 # `sea_session` overrides it — Cursor, whose conversation id is not the MCP
 # server's session); sea-lite maps it to the identity this session's MCP
@@ -83,8 +86,18 @@ ttl="$(cc_cfg_raw scope_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
 now_epoch="$(printf '%(%s)T' -1 2>/dev/null || date +%s)"
 
 # ── cache lookup (one jq) ─────────────────────────────────────────────
+# 0.5.1 (H2-21): a cached verdict only stands while the sea-lite store is
+# OLDER than the cache file (written right after the last scope-check): a
+# claim taken since then by anyone invalidates every cached verdict. A tie
+# (same second, bash 3.2) re-checks.
 verdict=""
-if [[ -s "$CC_SCOPE_CACHE" ]]; then
+seadb="$(cc_bg_seadb)"
+cache_fresh=1
+for f in "$seadb" "$seadb-wal"; do
+  [[ -e "$f" ]] || continue
+  [[ -e "$CC_SCOPE_CACHE" && "$f" -ot "$CC_SCOPE_CACHE" ]] || { cache_fresh=0; break; }
+done
+if (( cache_fresh )) && [[ -s "$CC_SCOPE_CACHE" ]]; then
   verdict="$(jq -c --arg f "$key" --argjson now "$now_epoch" --argjson ttl "$ttl" '
       .[$f] // empty | select(($now - .at) < $ttl)' "$CC_SCOPE_CACHE" 2>/dev/null || true)"
 fi
@@ -105,6 +118,11 @@ if [[ -z "$verdict" ]]; then
     rc=127
   fi
   contract=0; [[ "$out" == *'"schema": "sea-lite.scope-check/'* || "$out" == *'"schema":"sea-lite.scope-check/'* ]] && contract=1
+  # Only a real answer is cached (0.5.1, H2-21/H2-23): a timeout, a crash,
+  # an exit 2 other than outside_repo or a missing CLI allows THIS edit
+  # (fail open) and the next edit asks again. `down` names why, for the
+  # one-time advisory (H2-22).
+  cache=1; down=""
   case "$rc" in
     0) verdict='{"ok":true}';;
     1)
@@ -112,27 +130,35 @@ if [[ -z "$verdict" ]]; then
         verdict="$(jq -c '{ok:false, conflicts:[(.conflicts // [])[] | {holder:(.holder_label // .holder), ticket:(.ticket_id // ""), title:(.title // ""), held:(.held // []), expires:(.claim_expires_at // "")}]}' <<<"$out" 2>/dev/null)" || verdict=""
       fi
       if [[ -z "$verdict" ]]; then
-        verdict='{"ok":true}'; cc_log_once scope_oldsea "scope_guard: sea-lite scope-check gave no JSON contract (sea-lite older than 0.4.0?); failing open for ${ttl}s. Upgrade sea-lite."
+        verdict='{"ok":true}'; cache=0; down="sea-lite scope-check gave no usable answer"; cc_log_once scope_oldsea "scope_guard: sea-lite scope-check gave no JSON contract (sea-lite older than 0.4.0?); failing open for ${ttl}s. Upgrade sea-lite."
       fi;;
     2)
       verdict='{"ok":true}'
       if [[ "$contract" == 1 ]] && [[ "$(jq -r '.details.reason // ""' <<<"$out" 2>/dev/null)" == "outside_repo" ]]; then :
       else
+        cache=0
         msg=""; [[ "$contract" == 1 ]] && msg="$(jq -r '.message // ""' <<<"$out" 2>/dev/null)"
-        cc_log_once scope_err "scope_guard: sea-lite scope-check exited 2 (${msg:-unsupported subcommand or bad input}); failing open for ${ttl}s"
+        cc_log_once scope_err "scope_guard: sea-lite scope-check exited 2 (${msg:-unsupported subcommand or bad input}); failing open for this edit"
       fi;;
-    127) verdict='{"ok":true}'; cc_log_once scope_nobin "scope_guard: sea-lite CLI not found; failing open";;
-    *) verdict='{"ok":true}'; cc_log_once scope_unsupported "scope_guard: sea-lite scope-check exited $rc (crash or timeout); failing open for ${ttl}s";;
+    127) verdict='{"ok":true}'; cache=0; down="the sea-lite CLI was not found"; cc_log_once scope_nobin "scope_guard: sea-lite CLI not found; failing open";;
+    *) verdict='{"ok":true}'; cache=0; down="sea-lite scope-check $([[ "$rc" == 124 ]] && echo "timed out" || echo "failed (exit $rc)")"
+       cc_log_once scope_unsupported "scope_guard: sea-lite scope-check exited $rc (crash or timeout); failing open for this edit";;
   esac
-  # write back (best effort, atomic)
-  cur='{}'; [[ -s "$CC_SCOPE_CACHE" ]] && cur="$(cat "$CC_SCOPE_CACHE" 2>/dev/null || echo '{}')"
-  if cc_ensure_dirs && jq -c --arg f "$key" --argjson v "$verdict" --argjson now "$now_epoch" '
+  if [[ -n "$down" ]]; then
+    cc_sea_advise "$sid" "$down" && cc_emit_context PreToolUse "$CC_SEA_ADVICE"
+  elif (( cache )); then
+    cc_sea_recovered "$sid"
+  fi
+  # write back (best effort, atomic); entries from before a store change go
+  cur='{}'; (( cache_fresh )) && [[ -s "$CC_SCOPE_CACHE" ]] && cur="$(cat "$CC_SCOPE_CACHE" 2>/dev/null || echo '{}')"
+  if (( cache )) && cc_ensure_dirs && jq -c --arg f "$key" --argjson v "$verdict" --argjson now "$now_epoch" '
       (. // {}) | with_entries(select(($now - .value.at) < 3600)) | .[$f] = ($v + {at: $now})' <<<"$cur" > "$CC_SCOPE_CACHE.tmp.$$" 2>/dev/null; then
     mv -f "$CC_SCOPE_CACHE.tmp.$$" "$CC_SCOPE_CACHE"
   else
     rm -f "$CC_SCOPE_CACHE.tmp.$$"
   fi
 fi
+[[ -n "${down:-}" ]] && exit 0
 
 [[ "$verdict" == *'"ok":false'* ]] || exit 0
 
