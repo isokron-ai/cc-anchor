@@ -89,13 +89,17 @@ now_epoch="$(printf '%(%s)T' -1 2>/dev/null || date +%s)"
 # 0.5.1 (H2-21): a cached verdict only stands while the sea-lite store is
 # OLDER than the cache file (written right after the last scope-check): a
 # claim taken since then by anyone invalidates every cached verdict. A tie
-# (same second, bash 3.2) re-checks.
+# at `test`'s granularity (1 s with macOS bash 3.2) is settled by one
+# `find -newer` at the filesystem's precision.
 verdict=""
 seadb="$(cc_bg_seadb)"
 cache_fresh=1
+[[ -e "$CC_SCOPE_CACHE" ]] || cache_fresh=0
 for f in "$seadb" "$seadb-wal"; do
+  (( cache_fresh )) || break
   [[ -e "$f" ]] || continue
-  [[ -e "$CC_SCOPE_CACHE" && "$f" -ot "$CC_SCOPE_CACHE" ]] || { cache_fresh=0; break; }
+  if [[ "$f" -nt "$CC_SCOPE_CACHE" ]]; then cache_fresh=0
+  elif ! [[ "$f" -ot "$CC_SCOPE_CACHE" ]] && [[ -n "$(find "$f" -newer "$CC_SCOPE_CACHE" -print 2>/dev/null)" ]]; then cache_fresh=0; fi
 done
 if (( cache_fresh )) && [[ -s "$CC_SCOPE_CACHE" ]]; then
   verdict="$(jq -c --arg f "$key" --argjson now "$now_epoch" --argjson ttl "$ttl" '
