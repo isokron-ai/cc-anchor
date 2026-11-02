@@ -298,7 +298,8 @@ test('push/pulse fail open: a hanging CLI is killed at push_timeout, the command
     let t0 = Date.now();
     const r = pre(sb, './bin/deploy --target x', env);
     assert.equal(r.status, 0);
-    assert.equal(r.stdout, '', 'allowed (no decision)');
+    assert.equal(r.json?.hookSpecificOutput?.permissionDecision, undefined, 'allowed (no decision)');
+    assert.match(r.json?.hookSpecificOutput?.additionalContext ?? '', /runs WITHOUT a check/, 'L2-03: told on the first failure, not after 20');
     assert.ok(Date.now() - t0 < 6000, `bounded: ${Date.now() - t0} ms`);
     t0 = Date.now();
     assert.equal(post(sb, env).stdout, '');
@@ -308,7 +309,7 @@ test('push/pulse fail open: a hanging CLI is killed at push_timeout, the command
   } finally { sb.cleanup(); }
 });
 
-test('push/pulse fail open: a CLI that crashes or prints garbage → allow, nothing on stdout', () => {
+test('push/pulse fail open: a CLI that crashes or prints garbage → allow, the pulse says once that it ran unchecked', () => {
   const sb = sandbox();
   try {
     for (const body of ['echo boom >&2; exit 3', 'echo "not json"; exit 0']) {
@@ -316,10 +317,14 @@ test('push/pulse fail open: a CLI that crashes or prints garbage → allow, noth
       fs.writeFileSync(fake, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
       fs.rmSync(path.join(sb.run, 'push'), { recursive: true, force: true });
       const env = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: fake };
-      for (const r of [post(sb, env), pre(sb, './bin/deploy', env), pre(sb, './bin/build && ./bin/deploy', env)]) {
+      const rs = [post(sb, env), pre(sb, './bin/deploy', env), pre(sb, './bin/build && ./bin/deploy', env)];
+      for (const r of rs) {
         assert.equal(r.status, 0);
-        assert.equal(r.stdout, '', `${body}: ${r.stdout}`);
+        assert.equal(r.json?.hookSpecificOutput?.permissionDecision, undefined, `${body}: never a deny without any answer: ${r.stdout}`);
       }
+      assert.equal(rs[0].stdout, '', 'the push stays quiet (offline advisory after push_offline_after)');
+      assert.match(rs[1].json?.hookSpecificOutput?.additionalContext ?? '', /runs WITHOUT a check/, 'the first unchecked world-changing call is told');
+      assert.equal(rs[2].stdout, '', 'once per outage');
     }
   } finally { sb.cleanup(); }
 });

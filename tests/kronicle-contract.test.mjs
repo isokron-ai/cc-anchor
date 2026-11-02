@@ -97,7 +97,9 @@ for (const [label, env] of [['', {}], [' — 1-second mtime view (bash 3.2 / mac
     w.post('a'); // settles the gate after init
     const shim = path.join(w.sb.base, 'kl-shim');
     const calls = path.join(w.sb.base, 'calls');
-    fs.writeFileSync(shim, `#!/usr/bin/env bash\necho x >> ${JSON.stringify(calls)}\nexec node ${JSON.stringify(KL)} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(shim, `#!/usr/bin/env bash\necho "$1" >> ${JSON.stringify(calls)}\nexec node ${JSON.stringify(KL)} "$@"\n`, { mode: 0o755 });
+    const orients = () => fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l === 'orient').length;
+    const verifies = () => fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l === 'verify-chain').length;
     // The session's resolved CLI path is cached in <sid8>.cfg; point it at the shim.
     const cfg = path.join(w.sb.run, 'push', 'sesskl00.cfg');
     const [dd] = fs.readFileSync(cfg, 'utf8').split('\n');
@@ -106,11 +108,11 @@ for (const [label, env] of [['', {}], [' — 1-second mtime view (bash 3.2 / mac
     assert.ok(!fs.existsSync(calls), 'no orient call on an unchanged store');
     w.put(RB('staging-c'));
     assert.match(w.ctx(w.post('build')) || '', /staging-c/);
-    const n = fs.readFileSync(calls, 'utf8').trim().split('\n').length;
-    assert.equal(n, 2, 'a change costs a pulse (head) + one retractions call');
-    w.post('next'); // settle: one read-only pulse after our own orient write
+    assert.equal(orients(), 2, 'a change costs a pulse (head) + one retractions call');
+    w.post('next'); // settle: one read-only pulse after our own orient write (+ one read-only verify-chain: L2-02)
     w.post('next2');
-    assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 3, 'then quiet again');
+    assert.equal(orients(), 3, 'then quiet again');
+    assert.equal(verifies(), 1, 'the head-unchanged store write is integrity-checked once (verify-chain, read-only)');
   } finally { w.sb.cleanup(); }
 });
 
@@ -311,7 +313,8 @@ test('push/pulse (real CLI): an exact mtime tie (1-s filesystem, one kernel tick
     const cfg = path.join(w.sb.run, 'push', 'sesskl00.cfg');
     const [dd] = fs.readFileSync(cfg, 'utf8').split('\n');
     fs.writeFileSync(cfg, `${dd}\n${shim}\n`);
-    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0);
+    // orient reads only (a head-unchanged re-read also runs one read-only verify-chain, L2-02)
+    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l.startsWith('orient')).length : 0);
     const stamp = path.join(w.sb.run, 'push', 'sesskl00.stamp');
     const db = path.join(w.data, 'kronicle-lite.db');
     // The clock is driven explicitly (CC_ANCHOR_TEST_NOW), so no assertion

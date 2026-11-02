@@ -151,8 +151,17 @@ fi
 if [[ -e "$CC_KL_S.klcap" ]] || [[ ! -e "$CC_KL_S.klnocap" && "$CC_KL_FAILED" != 1 ]]; then
   if [[ ! -s "$CC_KL_B.klpend" ]] && ! cc_kl_pending_refresh && [[ -s "$CC_KL_B.cursor" ]]; then unknown=1; fi
 fi
+# L2-04: an actor found nowhere (no --actor / env in any MCP config cc-anchor
+# can read: --mcp-config, a plugin server, …) is a guess. `pending` for the
+# guess may say 0 while the real actor has pending changes, so the 0.4.0
+# retraction rule stays on as well, and the agent is told how to name it.
+actor_note=""
+if [[ "$CC_KL_ACTOR_SRC" == default ]]; then
+  actor_note="
+($(cc_kl_actor_note))"
+fi
 if [[ -e "$CC_KL_S.klcap" ]]; then
-  rm -f "$CC_KL_B.pending" 2>/dev/null; legacy=""; KL_BLOCK=0
+  if [[ -z "$actor_note" ]]; then rm -f "$CC_KL_B.pending" 2>/dev/null; legacy=""; KL_BLOCK=0; fi
   cc_kl_extra_pending
   (( CC_KL_XFAIL > 0 )) && unknown=1
   total=0; items=""; acts=""; known=""
@@ -172,17 +181,19 @@ if [[ -e "$CC_KL_S.klcap" ]]; then
 }${it}"
   done
   if (( total > 0 )); then
+    rm -f "$CC_KL_B.pending" 2>/dev/null   # shown here; the retraction rule must not repeat it after the re-read
     if [[ "$acts" == *", "* ]]; then who="you relied on (as actors ${acts})"; else who="you (actor ${acts}) relied on"; fi
     gate "${total} pending for ${acts}" "${total} kronicle-lite change(s) ${who} are not re-read at their current version:
 ${items}" "Until you re-read them, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}.
-Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change, retrying, or reading as another actor does not. Then check the values this command uses and run it again."
+Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change, retrying, or reading as another actor does not. Then check the values this command uses and run it again.${actor_note}"
   fi
   (( unknown )) && gate_unknown
-  if (( KL_SHOWN > 0 )); then
+  # Actor unknown: fall through to the retraction rule below.
+  [[ -n "$actor_note" ]] || if (( KL_SHOWN > 0 )); then
     cc_emit_context PreToolUse "cc-anchor pulse: kronicle-lite changed since your last check (head seq ${KL_SEQ}). None of it is pending re-read for you (actor(s) ${known:-$CC_KL_ACTOR}), so \`${head}\` runs; for reference:
 ${KL_BODY}"
   fi
-  exit 0
+  [[ -n "$actor_note" ]] || exit 0
 fi
 
 block_lines="$legacy"
@@ -192,12 +203,21 @@ if [[ -n "$block_lines" ]]; then
   rm -f "$CC_KL_B.pending" 2>/dev/null
   n="$(grep -c '^- ' <<<"$block_lines" 2>/dev/null || echo 1)"
   gate "${n} unreconciled retraction(s)" "kronicle-lite has ${n} change(s) you have not reconciled${KL_SEQ:+ (head seq ${KL_SEQ})}:
-${block_lines}" "This call is not read-only (${why}), so it was held back. Re-read the affected document(s) (recall, or get_system_state with your cursor), check the values this command uses, then run it again."
+${block_lines}" "This call is not read-only (${why}), so it was held back. Re-read the affected document(s) (recall, or get_system_state with your cursor), check the values this command uses, then run it again.${actor_note}"
 fi
 
 (( unknown )) && gate_unknown
+notes=""
+# L2-03: kronicle-lite has never answered in this session (nothing to fall
+# back on): this call runs unchecked — say so once per outage.
+if (( CC_KL_FAILED == 1 )) && [[ ! -e "$CC_KL_S.unavailwarned" ]]; then
+  : > "$CC_KL_S.unavailwarned" 2>/dev/null || true
+  notes="cc-anchor pulse: kronicle-lite could not be read (see .claude/cc-anchor/log), so \`${head}\` runs WITHOUT a check against runbook or note changes. Re-read what this command depends on (recall, get_system_state) before running world-changing commands; tell the operator if it persists."
+fi
 if (( KL_SHOWN > 0 )); then
-  cc_emit_context PreToolUse "cc-anchor pulse: kronicle-lite changed since your last check (head seq ${KL_SEQ}); none of it is a blocking retraction, so \`${head}\` runs:
+  notes="${notes:+$notes
+}cc-anchor pulse: kronicle-lite changed since your last check (head seq ${KL_SEQ}); none of it is a blocking retraction, so \`${head}\` runs:
 ${KL_BODY}"
 fi
+[[ -n "$notes" ]] && cc_emit_context PreToolUse "$notes"
 exit 0

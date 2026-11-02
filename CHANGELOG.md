@@ -7,7 +7,8 @@ SemVer.
 ## [0.5.1] — 2026-11-01
 
 Fixes the pending gate after hardening round 2 (agent-memory-bench
-`hardening-hooks` @ 3b10850 and 386db8c, `stress/findings/hooks.md`).
+`hardening-hooks` @ 3b10850 and 386db8c, `stress/findings/hooks.md`) and the
+live-agent round (`hardening-live` @ 738edc5, L2-02 … L2-04).
 The gate no longer tries to find dangerous commands in shell text.
 
 ### Changed
@@ -74,6 +75,26 @@ The gate no longer tries to find dangerous commands in shell text.
   without a re-read. The pulse denies them in any mode, pending or not,
   even without kronicle-lite configured, and tells the agent to re-read the
   pending items or ask the operator.
+- **L2-02**: a tamper that rewrites a stored block or event without moving
+  the head (projection-only) never reached the agent: cc-anchor read only
+  `orient --focus pulse` (no integrity verdict) unless the head moved. When
+  the store changed but the head did not, it now runs the read-only
+  `kronicle-lite verify-chain` (bounded by `push_timeout`; inconclusive on
+  timeout), so a mismatch is seen at once: the push warns (top priority)
+  and the pulse lets only read-only calls run.
+- **L2-03 (cc-anchor side)**: a damaged store (kronicle-lite exit 77, SQLite
+  CORRUPT / NOTADB, "database disk image is malformed") is an integrity
+  failure, not an outage: warned and gated at once instead of failing open
+  and advising "offline" after 20 calls. A genuinely unavailable
+  kronicle-lite is told to the agent on the first unchecked non-read-only
+  Bash call (and denies once there is a stale answer, H2-11).
+- **L2-04**: with no actor named in any MCP config cc-anchor can read
+  (`--mcp-config`, a plugin server …) the pending gate asked `local-agent`,
+  got 0 and also switched off the retraction rule. The actor is now known
+  to be a guess: the 0.4.0 retraction rule stays on next to the pending
+  gate, and the agent is told once (with the first change, and in every
+  deny) to set `CC_ANCHOR_KRONICLE_ACTOR`. `$CLAUDE_CONFIG_DIR/.claude.json`,
+  `$CLAUDE_CONFIG_DIR/settings.json` and its plugin cache are read too.
 - **H2-08**: `~/.claude.json` `projects[…]` is looked up by the literal
   project path and by its physical (symlink-resolved) path (also for
   sea-lite detection).
@@ -118,7 +139,9 @@ The gate no longer tries to find dangerous commands in shell text.
   0.5.1: nothing pending → nothing denied, read-only calls run while
   pending, the deny text, re-read via the CLI, actor union, fail closed /
   open, 100 KB command, warn mode; from 386db8c: `backoff`, `offline`,
-  `substop_pending`, plus `backoff_broken` and `ack`) runs from
+  `substop_pending`, plus `backoff_broken` and `ack`; from hardening-live:
+  `tamper_block|event|garbage`, `actor_unnamed`, `claude_config_dir`,
+  `unavailable_first`) runs from
   `tests/stress.test.mjs` against the real kronicle-lite 0.8.0.
 - `tests/stress/bash-guard.sh` (round 1), `bash-guard2.sh` and
   `scope-guard.sh` (round 2) against the real sea-lite CLI (Linux), plus

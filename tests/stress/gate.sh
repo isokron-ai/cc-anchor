@@ -179,4 +179,38 @@ if run ack; then setup
   r=$(reason "kronicle-lite shim ack"); [[ "$r" == *"operator's decision"* ]] && ok "H2-12: denied with nothing pending too" || bad "H2-12 nothing pending: ${r:0:120}"
   expect_allow "H2-12: \`kronicle-lite shim status\` is not an override" "kronicle-lite shim status"; done_; fi
 
+# --- hardening-live (L2-02 … L2-04)
+tamper() { # block | event | garbage — rewrite the store under kronicle-lite (python3 sqlite3)
+  python3 -I - "$DD/kronicle-lite.db" "$1" <<'PY'
+import sqlite3, sys
+k = sys.argv[2]
+if k == 'garbage':
+    f = open(sys.argv[1], 'r+b'); f.seek(4096 * 2); f.write(b'\x00' * 4096); f.close(); sys.exit()
+c = sqlite3.connect(sys.argv[1])
+if k == 'block': c.execute("update blocks set content=replace(content,'stg-east-1','stg-evil-9')")
+if k == 'event': c.execute("update events set payload_canonical=replace(payload_canonical,'stg-east-1','stg-evil-9')")
+c.commit()
+PY
+}
+for k in block event garbage; do if run "tamper_$k"; then setup; kl get runbook --actor agent-a >/dev/null; hook post-tool-use.sh PostToolUse >/dev/null
+  [[ "$(pend)" == 0 ]] || bad "tamper_$k: setup expected nothing pending"
+  tamper "$k"
+  o=$(hook post-tool-use.sh PostToolUse)
+  [[ "$o" == *"STORE INTEGRITY FAILURE"* ]] && ok "L2-02/L2-03 ($k): the push warns at once (head seq unchanged)" || bad "tamper $k: push said: ${o:0:160}"
+  r=$(reason "git push"); [[ "$r" == *"STORE INTEGRITY FAILURE"* ]] && ok "L2-02/L2-03 ($k): git push denied with the integrity text" || bad "tamper $k: pulse: ${r:0:160}"
+  expect_allow "…read-only still runs ($k)" "cat runbook.md"; done_; fi; done
+if run actor_unnamed; then MCP='{mcpServers:{"kronicle-lite":{command:"node",args:[$kl,"serve","--data-dir",$dd]}}}' setup  # agent-a read, server actor unknown
+  hook post-tool-use.sh PostToolUse >/dev/null   # the push delivers the change
+  r=$(reason "./bin/deploy --target stg-west-2")
+  [[ "$r" == *"stg-east-1"* && "$r" == *"CC_ANCHOR_KRONICLE_ACTOR"* ]] && ok "L2-04: actor not named anywhere: the retraction rule still denies and says how to name it" || bad "actor unnamed: ${r:0:200}"; done_; fi
+if run claude_config_dir; then MCPFILE=/dev/null setup; rm -f "$P/.mcp.json"; export CLAUDE_CONFIG_DIR=$W/cfgdir; mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n --arg kl "$KLBIN" --arg dd "$DD" --arg p "$P" '{projects:{($p):{mcpServers:{"kronicle-lite":{command:"node",args:[$kl,"serve","--data-dir",$dd,"--actor","agent-a"]}}}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  rm -rf "$P/.claude/cc-anchor/push"; hook session-start.sh SessionStart >/dev/null
+  expect_deny "L2-04: server and actor read from \$CLAUDE_CONFIG_DIR/.claude.json" "git push"; unset CLAUDE_CONFIG_DIR; done_; fi
+if run unavailable_first; then WRAP=1 MCPFILE=/dev/null setup; rm -rf "$P/.claude/cc-anchor/push"; touch "$W/broken"
+  export SID=sess-0010-zzzz CC_ANCHOR_KRONICLE=1 CC_ANCHOR_KRONICLE_DATA_DIR=$DD
+  o=$(pulse "git push"); o2=$(pulse "make")
+  [[ "$o" != *'"deny"'* && "$o" == *"WITHOUT a check"* && "$o2" != *"WITHOUT a check"* ]] && ok "L2-03: never answered: allowed, and told once that it ran unchecked" || bad "unavailable first: ${o:0:160} / ${o2:0:80}"
+  unset CC_ANCHOR_KRONICLE CC_ANCHOR_KRONICLE_DATA_DIR; export SID=sess-0001-aaaa; done_; fi
+
 echo; echo "gate: pass=$pass fail=$fail"; exit $(( fail > 0 ))

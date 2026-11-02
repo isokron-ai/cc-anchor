@@ -286,8 +286,11 @@ it got: a change known to be pending still denies. When the store has
 changed since that answer, the answer is stale: the gate re-reads even
 inside the push's 60 s back-off, and if that fails too, every call that is
 not read-only is denied ("kronicle-lite could not be read just now"). Only a
-CLI that has never answered in this session fails open (one log line, as
-before). A classifier error counts as "not read-only". `pulse_mode: warn`
+CLI that has never answered in this session fails open, and the first such
+unchecked call is told so. A store kronicle-lite reports as damaged (an
+integrity failure — also a rewrite that does not move the head — or an
+unreadable, corrupt database) is not "unavailable": the push warns at once
+and only read-only calls run. A classifier error counts as "not read-only". `pulse_mode: warn`
 allows the call and adds the same text as context.
 
 **Operator-only overrides.** `kronicle-lite shim ack`, `shim install` /
@@ -384,6 +387,10 @@ Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itse
   `--actor=ID` (or `KRONICLE_LITE_ACTOR`) in `.mcp.json` / `~/.claude.json`,
   else `local-agent` (the server's default) — **plus every `actor_id` the
   agent has passed to any MCP tool** (any server key, plugin prefixes too).
+  If no actor is named anywhere cc-anchor can read (a `--mcp-config` file or
+  a plugin server is invisible to hooks; `$CLAUDE_CONFIG_DIR/.claude.json`
+  is read), `local-agent` is only a guess: the 0.4.0 retraction rule then
+  stays on as well, and the agent is told to set `CC_ANCHOR_KRONICLE_ACTOR`.
   The gate is on the union, per agent: a subagent that reads as its own
   actor is checked on those reads and on the shared server actor's, and
   naming another actor never clears what one of them has pending. The

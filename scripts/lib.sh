@@ -180,6 +180,16 @@ cc_detect_cursor() {
   return 1
 }
 
+# MCP config files that may name the kronicle-lite / sea-lite server: the
+# project's .mcp.json, ~/.claude.json and, when Claude Code runs with
+# CLAUDE_CONFIG_DIR, that directory's .claude.json (0.5.1, L2-04). Paths
+# are read one per line.
+cc_cfg_files() {
+  printf '%s\n' "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"
+  [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}/.claude.json" != "${HOME}/.claude.json" ]] && printf '%s\n' "${CLAUDE_CONFIG_DIR%/}/.claude.json"
+  return 0
+}
+
 # The project root as a physical path (symlinks resolved), "" if it does
 # not exist. ~/.claude.json keys `projects` by a path: look up both
 # spellings, the literal $CLAUDE_PROJECT_DIR and this one (0.5.1, H2-08).
@@ -209,11 +219,11 @@ cc_kronicle_configured() {
   case "${CC_ANCHOR_KRONICLE:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
   local f phys; phys="$(cc_root_phys)"
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
     if jq -e --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klservers | length > 0' "$f" >/dev/null 2>&1; then return 0; fi
-  done
-  for f in "${HOME}/.claude/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
+  done < <(cc_cfg_files)
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
     [[ -s "$f" ]] || continue
     if jq -e '(.enabledPlugins // {}) | to_entries | any((.key | ascii_downcase | test("^kronicle")) and .value == true)' "$f" >/dev/null 2>&1; then return 0; fi
   done
@@ -361,15 +371,15 @@ cc_sea_configured() {
   case "${CC_ANCHOR_SEA:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
   local f phys; phys="$(cc_root_phys)"
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
     if jq -e --arg root "$CC_ROOT" --arg phys "$phys" '
         def hit: tostring | ascii_downcase | test("sea[-_]lite");
         def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {}) + (if $phys != "" then ((.projects // {})[$phys].mcpServers // {}) else {} end);
         servers | to_entries | any(.key | hit) or any(.value | ((.command // ""), (.args // [])) | hit)
       ' "$f" >/dev/null 2>&1; then return 0; fi
-  done
-  for f in "${HOME}/.claude/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
+  done < <(cc_cfg_files)
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
     [[ -s "$f" ]] || continue
     if jq -e '(.enabledPlugins // {}) | to_entries | any((.key | ascii_downcase | test("^sea[-_]lite")) and .value == true)' "$f" >/dev/null 2>&1; then return 0; fi
   done
@@ -390,8 +400,8 @@ cc_find_cli() {
   # Last: the npx cache. The isokron-plugins marketplace launches the MCP
   # servers with `npx -y <name>@<pin> serve`, so a plugin-only install has
   # the CLI there and nowhere else.
-  for f in "${HOME}"/.claude/plugins/cache/*/"$name"/*/node_modules/"$name"/dist/cli.js \
-           "${HOME}"/.claude/plugins/cache/*/*/*/node_modules/"$name"/dist/cli.js \
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/*/"$name"/*/node_modules/"$name"/dist/cli.js \
+           "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/*/*/*/node_modules/"$name"/dist/cli.js \
            "${CC_ROOT}"/node_modules/"$name"/dist/cli.js \
            "${npm_config_cache:-${HOME}/.npm}"/_npx/*/node_modules/"$name"/dist/cli.js; do
     [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
@@ -620,7 +630,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_FAILED=0; CC_KL_XFAIL=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_ACTOR_SRC=""; CC_KL_FAILED=0; CC_KL_XFAIL=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -696,11 +706,11 @@ cc_kl_data_dir() {
   v="${CC_ANCHOR_KRONICLE_DATA_DIR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   v="$(cc_cfg_raw kronicle_data_dir)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   phys="$(cc_root_phys)"
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
     v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--data-dir"; "KRONICLE_LITE_DATA_DIR")' "$f" 2>/dev/null)"
     [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  done
+  done < <(cc_cfg_files)
   printf '%s' "${KRONICLE_LITE_DATA_DIR:-}"
 }
 
@@ -708,18 +718,20 @@ cc_kl_data_dir() {
 # agent's MCP server actor. CC_ANCHOR_KRONICLE_ACTOR > config kronicle_actor
 # > the kronicle-lite server's --actor ID / --actor=ID / env
 # KRONICLE_LITE_ACTOR in .mcp.json or ~/.claude.json > $KRONICLE_LITE_ACTOR >
-# "local-agent" (the server default).
+# "local-agent" (the server default). Prints "<actor>\x1f<named|default>":
+# default = found nowhere, a guess (0.5.1, L2-04: the gate then also keeps
+# the retraction rule and says how to name the actor).
 cc_kl_actor_detect() {
   local v f phys
-  v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
+  v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
   phys="$(cc_root_phys)"
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
     v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--actor"; "KRONICLE_LITE_ACTOR")' "$f" 2>/dev/null)"
-    [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  done
-  printf '%s' "${KRONICLE_LITE_ACTOR:-local-agent}"
+    [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
+  done < <(cc_cfg_files)
+  if [[ -n "${KRONICLE_LITE_ACTOR:-}" ]]; then printf '%s\x1fnamed' "$KRONICLE_LITE_ACTOR"; else printf 'local-agent\x1fdefault'; fi
 }
 
 # The actor `orient --pending-actor` reports on: the session's configured
@@ -728,6 +740,11 @@ cc_kl_actor_detect() {
 # union, and naming another actor never clears what this one has pending
 # (0.5.1, H2-03c). Builtins only.
 cc_kl_agent_actor() { printf '%s' "$CC_KL_ACTOR"; }
+
+# 0.5.1 (L2-04): what to tell the agent when the server actor is a guess.
+cc_kl_actor_note() {
+  printf '%s' "cc-anchor does not know which kronicle-lite actor your MCP server reads as — none is named in .mcp.json or ~/.claude.json (a --mcp-config file or a plugin server is not visible to hooks) — so it checks \`${CC_KL_ACTOR}\` plus every new retraction. Set CC_ANCHOR_KRONICLE_ACTOR (or kronicle_actor in .claude/cc-anchor.json) to the server's --actor for the full pending gate."
+}
 
 # cc_kl_learn_actor <PostToolUse payload> — remember an actor_id the agent
 # passed in tool_input of ANY MCP tool (the kronicle-lite server may be
@@ -798,8 +815,9 @@ cc_kl_enabled() {
   local sw; sw="$(cc_cfg_raw push)"
   case "$sw" in 0|false|no|off) return 1;; esac
   if [[ -s "$CC_KL_S.cfg" ]]; then
-    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; IFS= read -r CC_KL_ACTOR; } < "$CC_KL_S.cfg"
-    [[ -n "$CC_KL_ACTOR" ]] || CC_KL_ACTOR="$(cc_kl_actor_detect)"
+    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; IFS= read -r CC_KL_ACTOR; IFS= read -r CC_KL_ACTOR_SRC; } < "$CC_KL_S.cfg"
+    [[ -n "$CC_KL_ACTOR" ]] || IFS=$'\x1f' read -r CC_KL_ACTOR CC_KL_ACTOR_SRC <<<"$(cc_kl_actor_detect)"
+    [[ -n "$CC_KL_ACTOR_SRC" ]] || CC_KL_ACTOR_SRC=named
     [[ -n "$CC_KL_BIN" ]] && return 0
   fi
   [[ -e "$CC_KL_S.off" ]] && return 1
@@ -813,8 +831,8 @@ cc_kl_enabled() {
     cc_log_once kl_nobin "push: kronicle-lite is configured but its CLI was not found (PATH, plugin cache, CC_ANCHOR_KRONICLE_LITE_BIN); retraction push/pulse off"
     return 1; }
   CC_KL_DD="$(cc_kl_data_dir)"
-  CC_KL_ACTOR="$(cc_kl_actor_detect)"
-  printf '%s\n%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" "$CC_KL_ACTOR" > "$CC_KL_S.cfg" 2>/dev/null || return 1
+  IFS=$'\x1f' read -r CC_KL_ACTOR CC_KL_ACTOR_SRC <<<"$(cc_kl_actor_detect)"
+  printf '%s\n%s\n%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" "$CC_KL_ACTOR" "$CC_KL_ACTOR_SRC" > "$CC_KL_S.cfg" 2>/dev/null || return 1
   return 0
 }
 
@@ -832,8 +850,10 @@ cc_kl_orient() {
   local pcwd; pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
   local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --pending-actor "$(cc_kl_agent_actor)" --cwd "${pcwd:-$CC_ROOT}")
   [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
-  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null
-  else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
+  # stderr is kept (last call only) so a failure can be told apart: a corrupt
+  # store is not "offline" (cc_kl_fail; 0.5.1, L2-03).
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>"$CC_KL_S.stderr"
+  else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>"$CC_KL_S.stderr"; fi
 }
 
 # Unavailable bookkeeping: every push/pulse call that could not read the
@@ -844,6 +864,7 @@ cc_kl_down() {
   printf '%s\n' "$((n + 1))" > "$CC_KL_S.down" 2>/dev/null || true
 }
 cc_kl_up() {
+  [[ -e "$CC_KL_S.unavailwarned" ]] && rm -f "$CC_KL_S.unavailwarned" 2>/dev/null
   [[ -e "$CC_KL_S.down" ]] || return 0
   rm -f "$CC_KL_S.down" "$CC_KL_S.downwarned" 2>/dev/null
   cc_log "push: kronicle-lite readable again; retraction feed back online"
@@ -942,6 +963,17 @@ cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_KL_S.fail" 2>/dev/null || true
   CC_KL_FAILED=1
+  # 0.5.1 (L2-03): a store that cannot be opened because it is damaged
+  # (exit 77, SQLite CORRUPT / NOTADB, "malformed", "not a database") is an
+  # integrity failure, not an outage: the push warns at once (top priority)
+  # and the pulse lets only read-only calls run — instead of failing open
+  # and advising "offline" after push_offline_after calls.
+  local err=""; [[ -s "$CC_KL_S.stderr" ]] && err="$(head -c 400 "$CC_KL_S.stderr" 2>/dev/null | tr '\n' ' ')"
+  if [[ "$1" == 77 ]] || [[ "$err" =~ (SQLITE_CORRUPT|SQLITE_NOTADB|[Mm]alformed|not a database|integrity|hash mismatch|corrupt) ]]; then
+    cc_kl_integrity_note "?" "the store cannot be read (kronicle-lite exit $1: ${err:0:200})"
+    cc_log_once kl_corrupt "push: kronicle-lite store looks damaged (exit $1); treating it as an integrity failure"
+    return 0
+  fi
   cc_kl_down
   if [[ "$1" == 124 ]]; then cc_log_once kl_timeout "push: kronicle-lite orient timed out (push_timeout); failing open"
   else cc_log_once kl_err "push: kronicle-lite orient failed (exit $1); failing open"; fi
@@ -1068,7 +1100,16 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   cc_kl_integrity_from "$out" || true
   cc_kl_pending_note "$out"
   [[ -s "$CC_KL_B.seq" ]] && IFS= read -r stored < "$CC_KL_B.seq"
-  if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up; return 1; fi
+  if [[ -n "$seq" && "$seq" == "$stored" ]]; then
+    # 0.5.1 (L2-02): the store changed but the head did not move — a
+    # rewrite of a stored block or event (projection-only tamper) does
+    # exactly that, and `--focus pulse` carries no integrity verdict. Check
+    # with the read-only `verify-chain` (the retractions focus would answer
+    # too, but it writes the store and every call would re-read).
+    mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up
+    cc_kl_verify
+    return 1
+  fi
   IFS= read -r cur < "$CC_KL_B.cursor"
   out="$(cc_kl_orient --cursor "$cur" --focus retractions)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
@@ -1110,10 +1151,33 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   return 0
 }
 
+# cc_kl_verify — `kronicle-lite verify-chain` (read-only), bounded by
+# push_timeout: exit 1 notes an integrity failure (first mismatch, or the
+# summary line), exit 0 clears one, anything else (slow on a big store, an
+# old CLI) is inconclusive and changes nothing (logged once).
+cc_kl_verify() {
+  local to out rc prob; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  local -a a=(verify-chain); [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then out="$(cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" 2>"$CC_KL_S.stderr")"; rc=$?
+  else out="$(cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" 2>"$CC_KL_S.stderr")"; rc=$?; fi
+  case "$rc" in
+    0) [[ "$out" == *'"ok": true'* || "$out" == *'"ok":true'* ]] && cc_kl_integrity_note ok;;
+    1)
+      prob="$(jq -r 'if (.projection.mismatches // []) | length > 0 then (.projection.mismatches[0] | "\(.table // "?") \(.key // "?") \(.field // ""): \(.detail // "projection mismatch")")
+        elif .first_mismatch != null then "chain mismatch at \(.first_mismatch | if type == "object" then (.seq // tostring) else tostring end)"
+        else "verify-chain failed" end | gsub("\\s+"; " ") | .[0:240]' <<<"$out" 2>/dev/null)"
+      [[ -n "$prob" ]] || prob="$(head -c 240 "$CC_KL_S.stderr" 2>/dev/null | tr '\n' ' ')"
+      cc_kl_integrity_note "?" "${prob:-verify-chain failed}: the store does not match its chain";;
+    *) cc_log_once kl_verify "push: kronicle-lite verify-chain inconclusive (exit $rc); integrity not re-checked";;
+  esac
+  return 0
+}
+
 cc_kl_integrity_text() {
   local s="?" p="integrity check failed"
   [[ -s "$CC_KL_S.integrity" ]] && IFS=$'\x1f' read -r s p < "$CC_KL_S.integrity"
-  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE at seq ${s}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). Meanwhile the cc-anchor pulse lets only read-only Bash commands run (unless pulse_mode is warn)."
+  local at=""; [[ "$s" =~ ^[0-9]+$ ]] && at=" at seq ${s}"
+  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE${at}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). Meanwhile the cc-anchor pulse lets only read-only Bash commands run (unless pulse_mode is warn)."
 }
 
 # cc_kl_integrity_recheck — re-read integrity now (bypassing the mtime gate):
@@ -1197,6 +1261,12 @@ cc_kl_push() {
 ${KL_BODY}
 Re-read the affected document (recall, or get_system_state with your cursor) and use the current text before you act on it."
   if (( KL_COS > 0 )) && ! cc_on push_cosmetic 0; then CC_KL_CONTEXT="${CC_KL_CONTEXT} (${KL_COS} cosmetic edit(s) not shown.)"; fi
+  # L2-04: said once per session, with the first change it matters for.
+  if [[ "$CC_KL_ACTOR_SRC" == default && ! -e "$CC_KL_S.actorwarned" ]]; then
+    : > "$CC_KL_S.actorwarned" 2>/dev/null || true
+    CC_KL_CONTEXT="${CC_KL_CONTEXT}
+$(cc_kl_actor_note)"
+  fi
   (( KL_BLOCK > 0 )) && printf '%s\n' "$KL_BODY" > "$CC_KL_B.pending"
   cc_log "push: ${KL_SHOWN} retraction(s) (${KL_BLOCK} blocking, ${KL_COS} cosmetic) at seq ${KL_SEQ}"
   return 0
