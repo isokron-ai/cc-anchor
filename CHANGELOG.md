@@ -4,6 +4,80 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [0.5.1] — 2026-11-01
+
+Fixes the pending gate after hardening round 2 (agent-memory-bench
+`hardening-hooks` @ 3b10850, `stress/findings/hooks.md`: one S1, six S2).
+The gate no longer tries to find dangerous commands in shell text.
+
+### Changed
+- **Gate semantics (H2-02, H2-04, H2-05, H2-07, H2-09).** Nothing pending
+  (and the store reads ok): every Bash call runs — no `pulse_match` regex,
+  no chain-split or one-liner denials (19/25 false alarms in round 2, and
+  `pulse_chain: split` re-denied every retry with nothing pending).
+  Something pending (`pending_count > 0` for any of the agent's actors on
+  kronicle-lite ≥ 0.8.0, an unseen blocking retraction on ≤ 0.7.0, or an
+  integrity failure): every Bash call is denied unless the new
+  `scripts/readonly.jq` proves it read-only (cat, less, head, tail, ls,
+  grep, rg, find without -exec/-delete, wc, diff, jq, git status/log/diff/
+  show/branch --list/rev-parse/ls-files…, kronicle-lite get/pending/orient,
+  sea-lite board/list/show…, echo/printf, pwd, which, cd). Anything it does
+  not fully understand — assignments, subshells, `$( )`, `<( )`, `$'…'`,
+  here-docs and here-strings, `source`, interpreters, redirections other
+  than to /dev/null, `&`, unbalanced quotes, calls over `pulse_max_bytes`
+  (8192) — is not read-only. The deny names each change (document ›
+  heading, the version read → the current one, the diff), what still runs
+  and why this call does not, and that re-reading clears it.
+  `scripts/pulse.jq` is gone; `pulse_match` and `pulse_chain` are ignored.
+- **Fail closed while pending (H2-02, H2-09).** A classifier error counts as
+  not read-only, and a kronicle-lite read that fails or times out falls
+  back to the last answer: a change known to be pending still denies;
+  nothing known pending still fails open. The classifier is one regex scan
+  (a 200 KB command took 14 s in jq before, past the 10 s hook timeout; now
+  over-size is refused up front). PreToolUse Bash hook timeout 10 → 15 s.
+- Pending items now say which version the agent read (`you read it at seq
+  N`).
+
+### Fixed
+- **H2-01 (S1)**: `--actor=X` in the kronicle-lite server's args was not
+  parsed, so the gate checked `local-agent` (0 pending), allowed `git push`
+  and told the agent the change it relied on did not block. `--actor X`,
+  `--actor=X` and `KRONICLE_LITE_ACTOR` are all read; the "nothing blocks"
+  context now only appears when nothing is pending for any of the agent's
+  actors and names them.
+- **H2-03**: `--data-dir=DIR` is parsed; the kronicle-lite server is found by
+  its command line (`npx kronicle-lite`, `node …/kronicle-lite/dist/cli.js`,
+  `kronicle-lite serve`, command strings with spaces) whatever its key, so
+  `"memory": {command: "kronicle-lite", …}` gets the right actor and store;
+  the gate is on the **union** of the configured actor and every `actor_id`
+  the agent passed to any MCP tool (any server key or plugin prefix) — an
+  `actor_id` on a non-read tool no longer switches the gated actor, and
+  naming another actor never clears a pending change. Per agent: a
+  subagent with its own actor is gated on it and on the server actor; the
+  parent is not gated on a subagent's private actor.
+- **H2-08**: `~/.claude.json` `projects[…]` is looked up by the literal
+  project path and by its physical (symlink-resolved) path (also for
+  sea-lite detection).
+
+### Documentation
+- README: the gate, the read-only allowlist, fail-closed rules, and what is
+  out of scope (H2-06: git indirection, quoted code arguments, functions /
+  aliases / exported env from before the change, Windows spellings — all
+  denied while something is pending since none is read-only, but only an
+  exec-time shim sees them otherwise; `git commit --no-verify`-style
+  bypasses of other guards).
+
+### Tests
+- `tests/stress/gate.sh` (the round-2 harness, 29 checks verbatim + 36 for
+  0.5.1: nothing pending → nothing denied, read-only calls run while
+  pending, the deny text, re-read via the CLI, actor union, fail closed /
+  open, 100 KB command, warn mode) runs from `tests/stress.test.mjs`
+  against the real kronicle-lite 0.8.0.
+- `tests/stress/pulse-corpus.sh` (85 cases) and `pulse-corpus2.sh` (125)
+  under 0.5.1 rules: no world-changing case reads as read-only, harmless
+  reads stay read-only; run from `tests/push.test.mjs` with new
+  `readonly.jq` unit tests.
+
 ## [0.5.0] — 2026-11-01
 
 Version-bound reconciliation with kronicle-lite 0.8.0 (`pending`), per-agent

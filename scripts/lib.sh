@@ -180,20 +180,38 @@ cc_detect_cursor() {
   return 1
 }
 
+# The project root as a physical path (symlinks resolved), "" if it does
+# not exist. ~/.claude.json keys `projects` by a path: look up both
+# spellings, the literal $CLAUDE_PROJECT_DIR and this one (0.5.1, H2-08).
+cc_root_phys() { (cd "$CC_ROOT" 2>/dev/null && pwd -P) || true; }
+
+# jq defs shared by the kronicle-lite server lookups (0.5.1, H2-01/H2-03):
+# MCP servers from .mcpServers and from .projects[<root, literal or
+# physical>].mcpServers; a server is kronicle-lite when its command line
+# (command split on blanks + args) names kronicle (npx kronicle-lite …,
+# node …/kronicle-lite/dist/cli.js, kronicle-lite serve) — whatever its key
+# — or, failing that, when its key does. opt("--x") reads `--x V` and
+# `--x=V`.
+# shellcheck disable=SC2016  # jq code, not shell
+CC_KL_SERVERS_JQ='
+def argv: ((.command // "") | tostring | split(" ") | map(select(. != ""))) + ((.args // []) | map(tostring));
+def klcmd: argv | any(ascii_downcase | test("kronicle"));
+def opt($n): argv as $a | [range(0; $a | length) as $i | if $a[$i] == $n then ($a[$i + 1] // empty) elif ($a[$i] | startswith($n + "=")) then ($a[$i] | .[($n | length) + 1:]) else empty end] | first // null;
+def servers: [(.mcpServers // {}), ((.projects // {})[$root].mcpServers // {}), (if $phys != "" then ((.projects // {})[$phys].mcpServers // {}) else {} end)] | add | to_entries;
+def klservers: servers | (map(select((.value | type) == "object" and (.value | klcmd))) + map(select((.key | ascii_downcase | test("kronicle")) and (((.value | type) != "object") or (.value | klcmd | not))))) | map(.value);
+def klopt($flag; $env): [klservers[] | select(type == "object") | (opt($flag) // .env[$env] // null) | select(. != null and . != "") | tostring] | first // empty;
+'
+
 # 0 when a kronicle-lite MCP server (or plugin) is configured for this
 # project, 1 otherwise. File-based only: `claude mcp list` spawns servers
 # and is far too slow for a hook. Override with CC_ANCHOR_KRONICLE=1|0.
 cc_kronicle_configured() {
   case "${CC_ANCHOR_KRONICLE:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
-  local f
+  local f phys; phys="$(cc_root_phys)"
   for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
     [[ -s "$f" ]] || continue
-    if jq -e --arg root "$CC_ROOT" '
-        def hit: tostring | ascii_downcase | test("kronicle");
-        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {});
-        servers | to_entries | any(.key | hit) or any(.value | ((.command // ""), (.args // [])) | hit)
-      ' "$f" >/dev/null 2>&1; then return 0; fi
+    if jq -e --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klservers | length > 0' "$f" >/dev/null 2>&1; then return 0; fi
   done
   for f in "${HOME}/.claude/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
     [[ -s "$f" ]] || continue
@@ -342,12 +360,12 @@ cc_on() {
 cc_sea_configured() {
   case "${CC_ANCHOR_SEA:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
-  local f
+  local f phys; phys="$(cc_root_phys)"
   for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
     [[ -s "$f" ]] || continue
-    if jq -e --arg root "$CC_ROOT" '
+    if jq -e --arg root "$CC_ROOT" --arg phys "$phys" '
         def hit: tostring | ascii_downcase | test("sea[-_]lite");
-        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {});
+        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {}) + (if $phys != "" then ((.projects // {})[$phys].mcpServers // {}) else {} end);
         servers | to_entries | any(.key | hit) or any(.value | ((.command // ""), (.args // [])) | hit)
       ' "$f" >/dev/null 2>&1; then return 0; fi
   done
@@ -662,24 +680,22 @@ cc_kl_seed() {
 cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
   rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" \
-        "$CC_KL_B.actor" "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" 2>/dev/null || true
+        "$CC_KL_B.actor" "$CC_KL_B.actors" "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" "$CC_KL_B".xp-* 2>/dev/null || true
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
-# CC_ANCHOR_KRONICLE_DATA_DIR > config kronicle_data_dir > the kronicle MCP
-# server's --data-dir / KRONICLE_LITE_DATA_DIR in .mcp.json or ~/.claude.json
-# > $KRONICLE_LITE_DATA_DIR > "" (the CLI's own default, ~/.kronicle-lite).
+# CC_ANCHOR_KRONICLE_DATA_DIR > config kronicle_data_dir > the kronicle-lite
+# MCP server's --data-dir DIR / --data-dir=DIR / env KRONICLE_LITE_DATA_DIR in
+# .mcp.json or ~/.claude.json (see CC_KL_SERVERS_JQ) > $KRONICLE_LITE_DATA_DIR
+# > "" (the CLI's own default, ~/.kronicle-lite).
 cc_kl_data_dir() {
-  local v f
+  local v f phys
   v="${CC_ANCHOR_KRONICLE_DATA_DIR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   v="$(cc_cfg_raw kronicle_data_dir)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  phys="$(cc_root_phys)"
   for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
     [[ -s "$f" ]] || continue
-    v="$(jq -r --arg root "$CC_ROOT" '
-        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
-        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
-        | map(((.args // []) | index("--data-dir") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_DATA_DIR // empty)
-        | first // empty' "$f" 2>/dev/null)"
+    v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--data-dir"; "KRONICLE_LITE_DATA_DIR")' "$f" 2>/dev/null)"
     [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   done
   printf '%s' "${KRONICLE_LITE_DATA_DIR:-}"
@@ -687,31 +703,86 @@ cc_kl_data_dir() {
 
 # The actor whose reads count for kronicle-lite's `pending` (0.8.0): the
 # agent's MCP server actor. CC_ANCHOR_KRONICLE_ACTOR > config kronicle_actor
-# > the kronicle server's --actor / KRONICLE_LITE_ACTOR in .mcp.json or
-# ~/.claude.json > $KRONICLE_LITE_ACTOR > "local-agent" (the server default).
+# > the kronicle-lite server's --actor ID / --actor=ID / env
+# KRONICLE_LITE_ACTOR in .mcp.json or ~/.claude.json > $KRONICLE_LITE_ACTOR >
+# "local-agent" (the server default).
 cc_kl_actor_detect() {
-  local v f
+  local v f phys
   v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
+  phys="$(cc_root_phys)"
   for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
     [[ -s "$f" ]] || continue
-    v="$(jq -r --arg root "$CC_ROOT" '
-        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
-        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
-        | map(((.args // []) | index("--actor") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_ACTOR // empty)
-        | first // empty' "$f" 2>/dev/null)"
+    v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--actor"; "KRONICLE_LITE_ACTOR")' "$f" 2>/dev/null)"
     [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   done
   printf '%s' "${KRONICLE_LITE_ACTOR:-local-agent}"
 }
 
-# The effective actor for THIS agent: one it named itself in a kronicle-lite
-# tool call (actor_id, learned by the PostToolUse hook) wins over the
-# session's server actor. Builtins only.
-cc_kl_agent_actor() {
-  local a=""
-  [[ -s "$CC_KL_B.actor" ]] && IFS= read -r a < "$CC_KL_B.actor"
-  printf '%s' "${a:-$CC_KL_ACTOR}"
+# The actor `orient --pending-actor` reports on: the session's configured
+# server actor. Every OTHER actor_id this agent has passed to an MCP tool is
+# in <B>.actors and checked too (cc_kl_extra_pending): the gate is on the
+# union, and naming another actor never clears what this one has pending
+# (0.5.1, H2-03c). Builtins only.
+cc_kl_agent_actor() { printf '%s' "$CC_KL_ACTOR"; }
+
+# cc_kl_learn_actor <PostToolUse payload> — remember an actor_id the agent
+# passed in tool_input of ANY MCP tool (the kronicle-lite server may be
+# registered under any key, or as a plugin: mcp__<anything>__*). Adding an
+# id that is not a kronicle-lite actor costs one `pending` read that finds
+# nothing; missing one would let reads under it go unchecked (H2-03d).
+cc_kl_learn_actor() {
+  [[ "$1" == *'"actor_id"'* && "$1" =~ \"tool_name\":[[:space:]]*\"mcp__ ]] || return 0
+  local na; na="$(jq -r '.tool_input.actor_id // empty | tostring | gsub("[[:cntrl:]]"; "")' <<<"$1" 2>/dev/null)"
+  [[ -n "$na" && "$na" != "$CC_KL_ACTOR" ]] || return 0
+  if [[ -s "$CC_KL_B.actors" ]] && grep -Fxq -- "$na" "$CC_KL_B.actors" 2>/dev/null; then return 0; fi
+  printf '%s\n' "$na" >> "$CC_KL_B.actors" 2>/dev/null || return 0
+  cc_log "push: agent ${CC_KL_AGENT:-main} used kronicle actor ${na:0:64}; gated on it as well as ${CC_KL_ACTOR}"
+}
+
+# File for an extra actor's last `pending` read (same format as <B>.klpend).
+cc_kl_xp_file() {
+  if (( ${#1} <= 64 )) && [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; then printf '%s' "$CC_KL_B.xp-$1"
+  else printf '%s' "$CC_KL_B.xp-h$(cc_hash "$1")"; fi
+}
+
+# cc_kl_extra_pending — refresh the pending reads of the extra actors that
+# have none since the store last changed (cc_kl_pending_note drops them on
+# every fresh briefing), all in parallel, each bounded by push_timeout.
+# A read that fails leaves no file: that actor counts as unknown (the CLI is
+# failing; logged), the last known answer of the others still stands.
+cc_kl_extra_pending() {
+  # A session started under 0.5.0 kept one learned actor in <B>.actor.
+  if [[ -s "$CC_KL_B.actor" ]]; then cat "$CC_KL_B.actor" >> "$CC_KL_B.actors" 2>/dev/null && rm -f "$CC_KL_B.actor"; fi
+  [[ -s "$CC_KL_B.actors" && -e "$CC_KL_S.klcap" ]] || return 0
+  local a f to pcwd n=0; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  local -a todo=() bg=()
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    f="$(cc_kl_xp_file "$a")"
+    [[ -s "$f" ]] || todo+=("$a")
+  done < "$CC_KL_B.actors"
+  (( ${#todo[@]} > 0 )) || return 0
+  pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
+  for a in "${todo[@]}"; do
+    f="$(cc_kl_xp_file "$a")"
+    (
+      args=(pending --actor "$a" --json --cwd "${pcwd:-$CC_ROOT}")
+      [[ -n "$CC_KL_DD" ]] && args+=(--data-dir "$CC_KL_DD")
+      if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${args[@]}" > "$f.raw.$$" 2>/dev/null
+      else cc_with_timeout "$to" "$CC_KL_BIN" "${args[@]}" > "$f.raw.$$" 2>/dev/null; fi
+    ) &
+    bg+=($!)
+  done
+  wait "${bg[@]}" 2>/dev/null
+  for a in "${todo[@]}"; do
+    f="$(cc_kl_xp_file "$a")"
+    local r=""; [[ -s "$f.raw.$$" ]] && r="$(cc_kl_pending_fmt "$(cat "$f.raw.$$")")"
+    rm -f "$f.raw.$$" 2>/dev/null
+    if [[ -n "$r" && "$r" != nocap ]]; then printf '%s\n' "$r" > "$f" 2>/dev/null; else n=$((n + 1)); fi
+  done
+  (( n > 0 )) && cc_log_once kl_xperr "pulse: kronicle-lite pending could not be read for ${n} extra actor(s); last known answers stand"
+  return 0
 }
 
 # cc_kl_enabled — 0 when the push/pulse should run for this session (and
@@ -810,20 +881,28 @@ cc_kl_integrity_from() {
 #                            "- …" line per item (at most 6)
 # Builtins + one jq. A briefing without pending_count (kronicle-lite <= 0.7.0)
 # switches the gate back to the retraction-since-last-look logic.
-cc_kl_pending_note() {
-  local r
-  r="$(jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
+# cc_kl_pending_fmt <orient or `pending --json` output> prints that text, or
+# "nocap" for a briefing without pending_count.
+cc_kl_pending_fmt() {
+  jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
     if (.pending_count | type) != "number" then "nocap" else
-      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
+      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // .actor_id // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
       ((.pending // [])[0:6][] |
         "- " + ([(.doc_slug // empty), ((.heading_path // []) | map(tostring) | join(" › ") | select(. != ""))] | join(" › "))
-        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")): read \"\(.old_text // "?" | clip(120))\" → "
+        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")"
+        + (if (.read.head_seq // null) != null then "; you read it at seq \(.read.head_seq)" else "" end) + ")"
+        + ": read \"\(.old_text // "?" | clip(120))\" → "
         + (if .current == null then "now REMOVED" else "now \"\(.new_text // "?" | clip(120))\"" end)
         + (if .diff != null then "; diff: \(.diff | clip(200))" else "" end)
         + (if (.derived_notes // []) | length > 0 then "; your notes derived from it: \((.derived_notes | map(if type == "object" then (.doc_slug // .slug // .block_id // "?") else tostring end) | join(", ")) | clip(120))" else "" end)
         + (if .resolve != null then " — \(.resolve | clip(160))" else "" end)),
-      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // "?"))" else empty end)
-    end' <<<"$1" 2>/dev/null)" || return 0
+      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // .actor_id // "?"))" else empty end)
+    end' <<<"$1" 2>/dev/null
+}
+
+cc_kl_pending_note() {
+  local r
+  r="$(cc_kl_pending_fmt "$1")" || return 0
   if [[ "$r" == nocap ]]; then
     [[ -e "$CC_KL_S.klcap" ]] && rm -f "$CC_KL_S.klcap" 2>/dev/null
     [[ -e "$CC_KL_B.klpend" ]] && rm -f "$CC_KL_B.klpend" 2>/dev/null
@@ -833,6 +912,10 @@ cc_kl_pending_note() {
   [[ -n "$r" ]] || return 0
   [[ -e "$CC_KL_S.klcap" ]] || { : > "$CC_KL_S.klcap"; rm -f "$CC_KL_S.klnocap" 2>/dev/null; }
   printf '%s\n' "$r" > "$CC_KL_B.klpend.$$" 2>/dev/null && mv -f "$CC_KL_B.klpend.$$" "$CC_KL_B.klpend"
+  # A fresh briefing means the store may have changed: the extra actors'
+  # answers are re-read the next time the gate needs them.
+  [[ -s "$CC_KL_B.actors" ]] && rm -f "$CC_KL_B".xp-* 2>/dev/null
+  return 0
 }
 
 # Pending count for this agent from the last briefing ("" = unknown).
@@ -1023,7 +1106,7 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
 cc_kl_integrity_text() {
   local s="?" p="integrity check failed"
   [[ -s "$CC_KL_S.integrity" ]] && IFS=$'\x1f' read -r s p < "$CC_KL_S.integrity"
-  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE at seq ${s}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). The cc-anchor pulse blocks world-changing commands meanwhile (unless pulse_mode is warn)."
+  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE at seq ${s}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). Meanwhile the cc-anchor pulse lets only read-only Bash commands run (unless pulse_mode is warn)."
 }
 
 # cc_kl_integrity_recheck — re-read integrity now (bypassing the mtime gate):
@@ -1052,12 +1135,9 @@ cc_kl_push() {
   cc_kl_session "$sid" "$(cc_payload_agent "$payload")"
   [[ -e "$CC_KL_S.off" ]] && return 0
   cc_kl_enabled || return 0
-  # The agent named its own kronicle-lite actor in a tool call: its pending
-  # list is that actor's (per agent: a subagent may use its own actor_id).
-  if [[ "$payload" =~ \"tool_name\":[[:space:]]*\"mcp__[^\"]*kronicle[^\"]*\" && "$payload" == *'"actor_id"'* ]]; then
-    local na; na="$(jq -r '.tool_input.actor_id // empty | tostring' <<<"$payload" 2>/dev/null)"
-    if [[ -n "$na" && "$na" != "$(cc_kl_agent_actor)" ]]; then printf '%s\n' "$na" > "$CC_KL_B.actor" 2>/dev/null; rm -f "$CC_KL_B.klpend" "$CC_KL_B.stamp" 2>/dev/null; fi
-  fi
+  # The agent named a kronicle-lite actor in an MCP tool call: the gate
+  # checks that actor too, from now on (union, per agent; 0.5.1).
+  cc_kl_learn_actor "$payload"
   # The agent got a tool call in since the last push: what it was told is no
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"

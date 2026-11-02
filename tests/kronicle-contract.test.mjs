@@ -141,7 +141,7 @@ test('pulse (real CLI): a world-changing command issued straight after the push 
       w.read();
     }
     assert.equal(w.pre('./bin/deploy --target staging-c').stdout, '', 'a tool call in between (legacy) / a re-read (pending) = allowed');
-    assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'non-world-changing commands are never checked');
+    assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'nothing pending: any command runs');
   } finally { w.sb.cleanup(); }
 });
 
@@ -160,16 +160,25 @@ test('pulse (real CLI): a change that lands after the last tool call is caught b
   } finally { w.sb.cleanup(); }
 });
 
-test('pulse (real CLI): chained `a && b && deploy` is split; pulse_chain=check allows it; inert prefixes are fine', opts, () => {
+test('pulse (real CLI): nothing pending → every call runs (no chain split, no regex); something pending → only read-only calls run', opts, () => {
   const w = world();
   try {
     w.start();
-    const d = w.pre('./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target staging-a');
-    assert.equal(w.decision(d), 'deny');
-    assert.match(w.reason(d), /each of `\.\/bin\/migrate`, `\.\/bin\/deploy --target staging-a` as its own Bash call/);
-    assert.equal(w.pre('./bin/preflight && ./bin/build').stdout, '', 'the non-world-changing prefix runs');
-    assert.equal(w.pre('cd /repo && ./bin/deploy --target staging-a').stdout, '');
-    assert.equal(w.pre('./bin/build && ./bin/deploy', undefined, { CC_ANCHOR_PULSE_CHAIN: 'check' }).stdout, '');
+    for (const c of ['./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target staging-a', 'npm ci && chmod +x scripts/deploy.sh', 'make && git checkout release/2.0']) {
+      assert.equal(w.pre(c).stdout, '', `nothing pending: ${c}`);
+      assert.equal(w.pre(c).stdout, '', `…and again: ${c}`);
+    }
+    w.put(RB('staging-b'));
+    for (const c of ['./bin/build', 'npm test', 'git checkout release/2.0', 'echo x > notes.md', 'TAG=v1; git push origin "$TAG"']) {
+      const d = w.pre(c);
+      assert.equal(w.decision(d), 'deny', `something pending: ${c}`);
+      assert.match(w.reason(d), /only read-only Bash commands run|not read-only/);
+      if (!CAP) w.post('reconciled'); // legacy: the deny is the delivery; set up the next case
+      if (!CAP) w.put(RB(`staging-${Math.random()}`));
+    }
+    for (const c of ['cat docs/runbook.md', 'git status && git log --oneline -3', 'grep -rn deploy docs/ 2>/dev/null | head']) {
+      assert.equal(w.decision(w.pre(c)), null, `read-only runs while pending: ${c}`);
+    }
   } finally { w.sb.cleanup(); }
 });
 
@@ -278,17 +287,16 @@ test('per-subagent cursors (real CLI): without a SubagentStart the subagent seed
   } finally { w.sb.cleanup(); }
 });
 
-test('pulse (real CLI): a world-changing interpreter one-liner is denied ONCE; the identical retry runs', opts, () => {
+test('pulse (real CLI): interpreter one-liners run when nothing is pending (0.5.0 denied them once) and are denied while something is', opts, () => {
   const w = world();
   try {
     w.start();
     const cmd = "python3 -c \"import os; os.system('git push origin main')\"";
+    assert.equal(w.pre(cmd).stdout, '', 'nothing pending: runs');
+    w.put(RB('staging-b'));
     const d = w.pre(cmd);
     assert.equal(w.decision(d), 'deny');
-    assert.match(w.reason(d), /inside an interpreter one-liner/);
-    assert.match(w.reason(d), /run this exact call again/);
-    assert.equal(w.pre(cmd).stdout, '', 'retry allowed');
-    assert.equal(w.decision(w.pre("node -e \"require('child_process').execSync('npm publish')\"")), 'deny', 'a different one-liner is denied once too');
+    assert.match(w.reason(d), /`python3` is not on the read-only list/);
   } finally { w.sb.cleanup(); }
 });
 

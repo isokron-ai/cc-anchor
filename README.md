@@ -40,6 +40,9 @@ blocks world-changing commands until the agent has re-read its current
 version (receiving it doesn't count), gives every subagent its own cursor,
 and warns when a Bash command changes files inside another session's
 sea-lite claim — see [Pending](#pending-kronicle-lite--080).
+**0.5.1** stops trying to spot dangerous commands in shell text: while a
+change is pending only provably read-only Bash calls run, and while nothing
+is pending nothing is denied — see [The gate](#the-gate-pretooluse-bash).
 
 ## Install
 
@@ -122,7 +125,7 @@ with `claude -p --autocompact 100k` and prints every hook event.
 | `UserPromptSubmit` | — | The bare word `anchor` re-injects the card. Everything else passes through — unless `InstructionsLoaded(compact)` found that the post-compaction injection did not run, in which case the card is re-asserted once with the next prompt. |
 | `Stop` | — | Rotates the trail; once per 30 min, a one-line nudge when the goal is > 45 min stale (`CC_ANCHOR_STOP_WARN=0` to disable). With the pack: claim guard, session document. |
 | `InstructionsLoaded` | `session_start\|compact\|nested_traversal\|path_glob_match\|include` | Stamps which CLAUDE.md / rules files were loaded (`Instructions:` line on the card) and arms the belt-and-braces re-assert after a compaction. Observe-only event. |
-| `PreToolUse` | `Bash` | Pulse (kronicle-lite only): before a world-changing command, denies it while a retraction the agent has not reconciled exists; splits `build && deploy` chains. Inert and ~5 ms without kronicle-lite. |
+| `PreToolUse` | `Bash` | Gate (kronicle-lite only): while a change the agent read is pending re-read (or the store fails integrity), denies every Bash call that is not provably read-only; nothing pending = nothing denied. Inert and ~5 ms without kronicle-lite. |
 | `PreToolUse` | `Edit\|Write\|MultiEdit\|NotebookEdit` | Scope guard (opt-in): denies an edit inside someone else's live sea-lite claim (another actor or another session). ~6 ms when off. Does not see Bash-tool edits. |
 | `SubagentStop` | — | Releases, or queues the release of, every sea-lite claim the stopping subagent took (auto when sea-lite is configured). |
 | `TaskCreated` / `TaskCompleted` | — | Task mirror (opt-in): native tasks → sea-lite tickets; completion gated on open predecessors. |
@@ -236,44 +239,74 @@ When kronicle-lite marks a retraction **cosmetic** (`cosmetic: true` or
 counted but not shown (`push_cosmetic` shows it) and never blocks. Without
 that flag every retraction is treated as semantic.
 
-**Pulse (`PreToolUse`, `Bash`).** Before a command matching `pulse_match`
-(default `deploy|migrate|publish|release|git push|terraform apply|kubectl
-apply`, word boundaries added, quoted text and read-only commands like
-`grep deploy` ignored) the hook checks again. The command is **denied**, with
-the diff in the reason, when either
+#### The gate (`PreToolUse`, `Bash`)
 
-- a retraction landed after the last tool call (the push could not deliver
-  it yet), or
-- the push delivered a blocking retraction on the *previous* tool result and
-  the agent went straight to this command without any tool call in between.
+0.5.0 looked for world-changing commands (`deploy`, `git push` …) in the
+shell text and checked kronicle-lite before those. A hardening round found
+that a shell has too many ways to hide one — `A=1; git push` crashed the
+matcher and was allowed, `source ./deploy.sh`, `cat <(./deploy.sh)`,
+here-doc tricks, `make -j release`, a 200 KB command that ran past the hook
+timeout — while ordinary calls (`git checkout release/2.0`, `chmod +x
+deploy.sh`) were false alarms. **0.5.1 turns the check around:**
 
-Blocking = semantic and severity `safety` or `behavioral`. The agent
-re-reads and runs the command again; the retraction was delivered, so the
-second attempt runs. `pulse_mode: warn` turns the deny into context.
+- **Nothing pending** (and the store reads ok): every Bash call runs. No
+  regex, no chain splitting, no one-liner denials.
+- **Something pending** — kronicle-lite ≥ 0.8.0 reports `pending_count > 0`
+  for any of the agent's actors (see [Pending](#pending-kronicle-lite--080)),
+  or, with kronicle-lite ≤ 0.7.0, a blocking retraction has not reached the
+  agent yet, or the store reports an integrity failure: every Bash call is
+  **denied** unless it is provably **read-only**. The reason names each
+  change (document › heading, the version read → the current one, the diff)
+  and says that re-reading clears it.
 
-**What counts as world-changing.** Each pipeline stage is tokenized like a
-shell would (quotes stripped from the command name, whitespace collapsed),
-wrappers are dropped with their options (`sudo -E`, `env -i`, `nice -n`,
-`timeout 600`, `time`, `nohup`), and the tool's global options are skipped,
-so `git -C ../svc --no-pager push`, `kubectl -n prod apply`, `terraform
--chdir=infra apply` and `npm --prefix web publish` all match. Quoted
-arguments never match (`git commit -m "release notes"`). The code of
-interpreter one-liners (`python -c`, `node -e`, `perl -e`, `ruby -e`,
-`bash -c`, `eval`) and of here-documents an interpreter reads
-(`python3 - <<'PY'`, `cat <<EOF | bash`) is scanned; a world-changing one is
-denied **once** and the identical retry runs. Line continuations are joined
-and a quoted verb counts (`"git" "push"`). This matcher is defence in depth, not a boundary:
-a command it does not name, or one buried in a script, is only caught at
-exec time, by a shim on `PATH` (kronicle-lite shims, next cycle).
+Read-only means a list of simple commands joined by `&&` `||` `;` `|` or
+newlines, each one of: `cat` `less` `head` `tail` `ls` `grep`/`egrep`/`fgrep`
+`rg` `find` `wc` `diff` `jq` `stat` `basename` `dirname` `realpath` `pwd`
+`which` `echo` `printf` `cd` `true`; `git status|log|diff|show|rev-parse|
+ls-files|ls-tree|cat-file|blame|describe|merge-base|show-ref`, `git branch`
+(listing only) and `git remote -v`; `kronicle-lite get|pending|orient|doctor|
+verify-chain|keys` and `sea-lite board|list|show|whoami|stats|verify|doctor|
+scope-check` (also as `npx [-y] <cli>[@ver]` or `node …/<cli>/dist/cli.js`).
+Everything the parser (`scripts/readonly.jq`) does not fully understand is
+**not** read-only: any other command or a path to one, an assignment, a
+subshell or `{ }` group, `$( )` and backticks, `<( )` / `>( )`, `$'…'`,
+`${…}` other than `${NAME}`, `$1` `$@` `$?`, here-docs and here-strings, `&`,
+a redirection other than to `/dev/null` or an fd dup (`2>&1`), `find
+-exec/-execdir/-ok/-delete/-fprint*`, `rg --pre`, `less -o/+cmd`, git global
+options other than `-C`/`--no-pager`, `git … --output`, an unquoted
+variable, glob or brace in the arguments of `find`/`rg`/`less`/`git` (it
+could expand into an option), an unbalanced quote, or a call longer than
+`pulse_max_bytes` (8192). Comments, quoting and line continuations are read
+the way bash reads them. Re-reading through Bash works too:
+`kronicle-lite get <slug> --actor <actor>` is itself read-only.
 
-**Chains.** The push only fires *between* tool calls, so in
-`./bin/build && ./bin/migrate && ./bin/deploy` a runbook change that lands
-during the build reaches the agent after the stale deploy (Track B finding
-F2). With `pulse_chain: split` (default) such a call is denied once with *run
-`./bin/migrate`, `./bin/deploy` each as its own Bash call*. A world-changing
-step that comes first, or after only `cd` / `export` / `echo` / read-only
-steps (`git status`, `cat`, `ls` …), is fine; a pipeline is one step.
-`pulse_chain: check` allows chains (checks once before the call).
+**Fail closed while pending, open otherwise.** If kronicle-lite cannot be
+read (CLI missing, crashing, past `push_timeout`) the gate decides on the
+last answer it got: a change known to be pending still denies; nothing known
+pending allows (one log line, as before). A classifier error counts as "not
+read-only". `pulse_mode: warn` allows the call and adds the same text as
+context.
+
+**What it does not catch** (out of scope; only an exec-time check — the
+kronicle-lite PATH shims — or nothing can):
+
+- anything while nothing is pending: the gate is about acting on stale
+  reads, not about which commands are dangerous;
+- a change that lands *during* a single Bash call (the push only fires
+  between calls);
+- shell state set up before the change became pending and used by an
+  allowlisted name: a function or alias named `cat`/`ls`/`git` in the
+  user's shell snapshot, an exported `GIT_*` / `LESSOPEN` / `RIPGREP_CONFIG_PATH`,
+  a `.git/config` alias, pager, `diff.external` or fsmonitor hook;
+- git indirection and quoted code that only an exec-time shim sees once
+  nothing is pending (`git -c alias.x=push x`, `git submodule foreach 'git
+  push'`, `git rebase -x …`, `watch`/`trap`/`tmux` strings, `xargs git`,
+  Windows `git.exe` / `cmd /c` spellings) — while something is pending all of
+  these are denied anyway, because none of them is read-only;
+- deliberate bypasses of other guards: `git commit --no-verify`,
+  `core.hooksPath=/dev/null`, `KRONICLE_SHIM_EXEC` tricks, editing the
+  plugin's own files or `cc-anchor.json` (`pulse: off`) while nothing is
+  pending.
 
 **Cost and failure.** While `kronicle-lite.db` (and its `-wal`) are older
 than the session's stamp, the push costs two builtin `-ot` tests and no
@@ -286,11 +319,16 @@ not retried for 60 s. If that lasts `push_offline_after` (20) consecutive
 calls, the agent gets one advisory that the retraction feed is offline.
 A store that answers but reports `integrity.ok: false` (corrupt or tampered
 chain) is the opposite case: the push warns once per distinct problem, no
-retractions are taken from it, and the pulse denies world-changing commands
-until a fresh read says the store is ok. The store is the one the kronicle MCP server uses:
+retractions are taken from it, and the gate lets only read-only Bash calls
+run until a fresh read says the store is ok. The store is the one the kronicle-lite MCP server uses:
 `kronicle_data_dir` / `CC_ANCHOR_KRONICLE_DATA_DIR`, else the server's
-`--data-dir` (or `KRONICLE_LITE_DATA_DIR` env) in `.mcp.json` /
-`~/.claude.json`, else `$KRONICLE_LITE_DATA_DIR`, else `~/.kronicle-lite`.
+`--data-dir DIR` / `--data-dir=DIR` (or `KRONICLE_LITE_DATA_DIR` env) in
+`.mcp.json` / `~/.claude.json`, else `$KRONICLE_LITE_DATA_DIR`, else
+`~/.kronicle-lite`. The server is recognised by its command line (`npx
+kronicle-lite …`, `node …/kronicle-lite/dist/cli.js`, `kronicle-lite serve`),
+whatever its key in `mcpServers` (`"memory"` works), else by a key that names
+kronicle; `~/.claude.json` `projects` is looked up under both the literal
+project path and its physical (symlink-resolved) path.
 The CLI is looked up like the other hooks do (`CC_ANCHOR_KRONICLE_LITE_BIN`,
 `PATH`, the plugin cache, `node_modules`) and finally in the npx cache, where
 the isokron-plugins `npx -y kronicle-lite@… serve` launch leaves it. Needs
@@ -299,15 +337,15 @@ kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
 | Switch | Default | |
 |---|---|---|
 | `push` | auto | On when kronicle-lite is configured; `0` disables the push (the pulse follows unless set). |
-| `push_timeout` | `3` | Seconds per `kronicle-lite orient` call. |
+| `push_timeout` | `3` | Seconds per kronicle-lite CLI call. |
 | `kronicle_actor` | auto | The agent's kronicle-lite actor for `pending` (see Pending). |
 | `push_reminder_after` | `15` | Tool calls a delivered change may stay pending before one reminder line; `0` never. |
 | `push_offline_after` | `20` | Consecutive unreadable calls before one "retraction feed offline" advisory; `0` never. |
 | `push_cosmetic` | off | Also list retractions kronicle-lite marks cosmetic. |
-| `pulse` | auto | `0` disables the pre-command check. |
-| `pulse_match` | `deploy\|migrate\|publish\|release\|git push\|terraform apply\|kubectl apply` | Which commands change the world. |
-| `pulse_mode` | `deny` | `warn`: allow, add the retractions as context. |
-| `pulse_chain` | `split` | `check`: allow chained calls. |
+| `pulse` | auto | `0` disables the gate. |
+| `pulse_mode` | `deny` | `warn`: allow, add the pending list as context. |
+| `pulse_max_bytes` | `8192` | A longer Bash call is never read-only. |
+| `pulse_match`, `pulse_chain` | — | Ignored since 0.5.1. |
 | `kronicle_data_dir` | auto | Store to read (see above). |
 
 #### Pending (kronicle-lite ≥ 0.8.0)
@@ -317,38 +355,42 @@ away or never acted on. kronicle-lite 0.8.0 tracks, per actor, every change
 to something that actor read which it has **not re-read at the current
 version** (`pending`). cc-anchor passes `--pending-actor <the agent's
 actor>` on every `orient`, and when the briefing carries `pending_count`
-the pulse gates on it:
+the gate is on:
 
 ```
 cc-anchor pulse: did NOT run `./bin/deploy --target stg-a` — 1 kronicle-lite change(s) you (actor local-agent) relied on are not re-read at their current version:
-- runbook › Runbook › Deploy (seq 7, superseded/behavioral): read "Deploy to stg-a." → now "Deploy to stg-b."; diff: Deploy to [-stg-a.-]{+stg-b.+} — recall it again or read kronicle://docs/runbook
-Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change does not. …
+- runbook › Runbook › Deploy (seq 7, superseded/behavioral; you read it at seq 4): read "Deploy to stg-a." → now "Deploy to stg-b."; diff: Deploy to [-stg-a.-]{+stg-b.+} — recall it again or read kronicle://docs/runbook
+Until you re-read them, only read-only Bash commands run (cat, less, head, …); this call is not one: `./bin/deploy` (a path to a program or script) is not on the read-only list.
+Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change, retrying, or reading as another actor does not. …
 ```
 
 - The gate is `pending_count > 0`; re-reading the current version clears it
   with no manual step. Retrying the command, or having been pushed the
-  change, does not. An integrity failure still blocks first;
-  `pulse_mode: warn` still only warns.
+  change, does not. `pulse_mode: warn` still only warns.
 - The push never re-pushes a delivered change, but if it is still pending
-  `push_reminder_after` (15) tool calls later and no world-changing command
-  was attempted, it adds **one** reminder line.
-- The agent's actor: `kronicle_actor` / `CC_ANCHOR_KRONICLE_ACTOR`, else the
-  kronicle server's `--actor` (or `KRONICLE_LITE_ACTOR`) in `.mcp.json` /
-  `~/.claude.json`, else `local-agent` (the server's default). An agent that
-  passes its own `actor_id` to a kronicle-lite tool is gated on that actor's
-  reads — so a subagent with its own actor is checked on its own reads.
-- With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the pulse keeps
-  the 0.4.0 rule: deny while a retraction has not been delivered yet.
+  `push_reminder_after` (15) tool calls later and the gate has not shown it
+  meanwhile, it adds **one** reminder line.
+- The agent's actors: the configured one — `kronicle_actor` /
+  `CC_ANCHOR_KRONICLE_ACTOR`, else the kronicle-lite server's `--actor ID` /
+  `--actor=ID` (or `KRONICLE_LITE_ACTOR`) in `.mcp.json` / `~/.claude.json`,
+  else `local-agent` (the server's default) — **plus every `actor_id` the
+  agent has passed to any MCP tool** (any server key, plugin prefixes too).
+  The gate is on the union, per agent: a subagent that reads as its own
+  actor is checked on those reads and on the shared server actor's, and
+  naming another actor never clears what one of them has pending. The
+  parent is not gated on a subagent's private actor.
+- With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the 0.4.0 rule
+  decides when the gate is on: a blocking retraction that has not reached
+  the agent yet (the deny delivers it; the retry runs).
 
 **Subagents** have their own cursors: subagent tool events carry
 `agent_id`, a `SubagentStart` hook seeds the subagent's cursor from the main
 agent's (a file copy), and each agent — parent and every subagent — is told
-about a retraction exactly once, at its own next tool call. The pulse's
-"delivered, not acted on yet" state is per agent too.
+about a retraction exactly once, at its own next tool call. The gate's
+state is per agent too.
 
-Not covered: Bash calls the regex does not name; a change that lands
-*during* a single world-changing command. Cursor has no post-tool context output, so the push is Claude
-Code-only for now.
+Cursor has no post-tool context output, so the push is Claude Code-only for
+now.
 
 ## Lifecycle hooks pack
 
@@ -506,7 +548,7 @@ Install (project scope — the file is meant to be committed; `--scope user`
 writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
 
 ```sh
-node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.5.0/scripts/anchor.mjs cursor install
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.5.1/scripts/anchor.mjs cursor install
 # or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
 ```
 
@@ -569,7 +611,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 ## Development
 
 ```sh
-npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.7.0   # real CLIs for the contract tests
+npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.8.0   # real CLIs for the contract tests
 npm test                    # node:test, 142 tests (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
@@ -577,8 +619,8 @@ npm run validate            # claude plugin validate --strict --profile director
 
 Layout: `hooks/hooks.json` → `scripts/*.sh` (bash + jq, fail-open) →
 `scripts/render.jq` (the one renderer) + `scripts/claims.jq` (the claim state
-machine) + `scripts/retractions.jq` / `scripts/pulse.jq` (retraction lines,
-Bash command analysis) ← `scripts/anchor.mjs` (CLI, edits the top section only, installs
+machine) + `scripts/retractions.jq` / `scripts/readonly.jq` (retraction lines,
+the gate's read-only classifier) ← `scripts/anchor.mjs` (CLI, edits the top section only, installs
 the packs) ← `skills/anchor/SKILL.md` (the slash command and the discipline).
 `scripts/task-mirror.mjs` is the only hook that needs Node (task mirror,
 opt-in). `cursor/` holds the Cursor adapter. Tests feed the scripts the exact

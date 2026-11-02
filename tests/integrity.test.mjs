@@ -2,7 +2,7 @@
 // "nothing to push".
 //   * integrity.ok === false in an orient result → one top-priority warning
 //     per distinct problem, no retractions from the corrupt store, and the
-//     pulse denies world-changing commands until a fresh read says ok
+//     pulse lets only read-only Bash calls run until a fresh read says ok
 //     (pulse_mode=warn still warns). Stub CLI until kronicle-lite returns
 //     integrity:{ok:false, problem, seq} instead of throwing.
 //   * kronicle unavailable (missing / failing / timing out / non-JSON) stays
@@ -67,7 +67,7 @@ test('integrity (stub, kl contract): ok:false → one top-priority warning per d
   } finally { w.sb.cleanup(); }
 });
 
-test('integrity (stub): the pulse denies world-changing commands while it persists, warns in warn mode, allows after repair — and the parked retractions arrive', () => {
+test('integrity (stub): the pulse denies non-read-only commands while it persists, warns in warn mode, allows after repair — and the parked retractions arrive', () => {
   const w = stubWorld();
   try {
     w.start();
@@ -76,7 +76,8 @@ test('integrity (stub): the pulse denies world-changing commands while it persis
     const d = w.pre('./bin/deploy --target b');
     assert.equal(w.decision(d), 'deny');
     assert.match(w.reason(d), /did NOT run `\.\/bin\/deploy --target b` — kronicle-lite STORE INTEGRITY FAILURE at seq 6/);
-    assert.equal(w.pre('./bin/notify --channel x').stdout, '', 'non-world-changing commands still run');
+    assert.equal(w.decision(w.pre('./bin/notify --channel x')), 'deny', '0.5.1: every call that is not read-only is held back');
+    assert.equal(w.pre('cat docs/runbook.md | head -20').stdout, '', 'read-only calls still run');
     const warn = w.pre('git push origin main', { CC_ANCHOR_PULSE_MODE: 'warn' });
     assert.equal(w.decision(warn), null);
     assert.match(w.ctx(warn), /pulse \(warn\): `git push origin main` is about to run while kronicle-lite STORE INTEGRITY FAILURE/);

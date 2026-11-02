@@ -1,5 +1,5 @@
-// Unit tests for the 0.4.0 kronicle-lite retraction push / pulse that need no
-// kronicle-lite: the Bash command analysis (scripts/pulse.jq), the retraction
+// Unit tests for the kronicle-lite retraction push / pulse that need no
+// kronicle-lite: the read-only classifier (scripts/readonly.jq, 0.5.1), the retraction
 // renderer (scripts/retractions.jq, incl. the cosmetic flag kronicle-lite may
 // add), inertness without kronicle-lite, and the fail-open paths with a fake
 // CLI that hangs or crashes. The contract with the REAL CLI is in
@@ -12,25 +12,91 @@ import path from 'node:path';
 
 import { SCRIPTS, sandbox, hook } from './helpers.mjs';
 
-const MATCH = 'deploy|migrate|publish|release|git push|terraform apply|kubectl apply';
-
-function analyse(command, match = MATCH) {
-  const r = spawnSync('jq', ['-c', '--arg', 'match', match, '-f', path.join(SCRIPTS, 'pulse.jq')], { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' });
+function classify(command, max = '8192') {
+  const r = spawnSync('jq', ['-c', '--arg', 'max', max, '-f', path.join(SCRIPTS, 'readonly.jq')], { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }
+const ro = (c) => classify(c).ro;
 
-test('pulse.jq: plain world-changing commands match, with word boundaries', () => {
-  for (const c of ['./bin/deploy --target prod-b', 'make deploy', 'npm publish', 'git push origin main', 'terraform apply -auto-approve', 'kubectl apply -f k8s/', 'rails db:migrate', 'gh release create v1', './scripts/deploy-prod.sh', 'FOO=1 sudo ./scripts/release.sh 2>&1 | tee log', 'cat deployment.yaml | kubectl apply -f -', 'echo $(./bin/deploy)']) {
-    assert.ok(analyse(c).world.length === 1, `world-changing: ${c}`);
-  }
-  for (const c of ['cat deployment.yaml', 'grep -n deploy docs/runbook.md', 'git commit -m "prepare release"', './bin/predeploy-lint', 'ls deployments/', 'git log --grep=release', './bin/notify --channel "#ops"', './bin/build # then deploy', "echo 'deploy later'", 'git status && git log']) {
-    assert.deepEqual(analyse(c).world, [], `not world-changing: ${c}`);
+// 0.5.1: while something is pending the gate lets only provably read-only Bash
+// calls run; anything the classifier does not fully understand is not read-only.
+test('readonly.jq: the allowlist — plain reads, pipelines, chains, /dev/null and fd redirections, comments', () => {
+  for (const c of ['cat a.txt', 'ls -la', 'head -n 20 README.md | tail -5', 'grep -rn "deploy" src/ 2>/dev/null | wc -l', 'rg -n TODO src -g \'*.ts\'',
+    "find . -name '*.md' -type f", 'wc -l a b', 'diff a b', 'jq .version package.json', 'pwd', 'which node', 'echo "$HOME/x"', 'printf \'%s\\n\' a',
+    'cd svc && git status', 'git -C ../svc --no-pager log --oneline -5', 'git diff HEAD~1 -- \'*.ts\'', 'git show HEAD:README.md', 'git branch', 'git branch -a',
+    'git branch --list "fix-*"', 'git branch --merged main', 'git rev-parse --abbrev-ref HEAD', 'git ls-files', 'git remote -v', 'less -R log.txt',
+    'cat x >/dev/null 2>&1', 'ls 2>/dev/null', 'cat a &>/dev/null', 'echo hi >&2', '# git push\nls', 'ls # git push', 'g\'\'it log', 'c\\at a',
+    'kronicle-lite get runbook --actor agent-a', 'npx -y kronicle-lite@0.8.0 pending --actor a --json', 'node node_modules/kronicle-lite/dist/cli.js orient --json',
+    'sea-lite board --json', 'npx sea-lite show 12', '', '   ', 'ls;', 'cat a\ncat b']) {
+    assert.equal(ro(c), true, `read-only: ${JSON.stringify(c)} — ${classify(c).why}`);
   }
 });
 
-// Adversarial corpus from agent-memory-bench stress/cca/pulse-corpus.sh, 85 cases (W = must
-// be world-changing, Q = must stay quiet). Literal \\t / \\n are expanded like printf.
+test('readonly.jq: everything else is not read-only, with the reason', () => {
+  const cases = {
+    'git push': /`git push` is not on the read-only list/,
+    'npm test': /`npm` is not on the read-only list/,
+    './bin/deploy': /a path to a program or script/,
+    'A=1; ls': /a variable assignment/,
+    'ls > out.txt': /a redirection to a file/,
+    'cat a >> log': /a redirection to a file/,
+    'cat < in.txt': /a redirection to a file/,
+    'cat <<EOF\nx\nEOF': /a here-document/,
+    'wc -w <<<hello': /a here-string/,
+    'cat <(./deploy.sh)': /process substitution/,
+    '(ls)': /subshell/,
+    '{ ls; }': /glob/,
+    'echo $(git push)': /command substitution/,
+    'echo "$(git push)"': /command substitution/,
+    'echo `git push`': /backticks/,
+    "echo $'a'": /\$'…'/,
+    'echo ${x:-y}': /shell expansion/,
+    'echo "$1"': /shell expansion/,
+    'ls &': /background/,
+    '$CMD x': /variable/,
+    'find . -name x -delete': /find with -delete/,
+    "find . -exec rm {} \\;": /glob|-exec/,
+    'find . -ok rm {} ;': /glob|-ok/,
+    'find . -name *.js': /unquoted variable, glob or brace in find/,
+    'find . $X': /unquoted variable, glob or brace in find/,
+    'rg --pre=sh x': /rg --pre/,
+    'less +!git push x': /less option/,
+    'less -o out x': /less option/,
+    'git -c alias.x=push x': /git option `-c`/,
+    'git log --output=x': /--output/,
+    'git branch -D x': /git branch/,
+    'git branch newbranch': /git branch/,
+    'git remote add o u': /git remote/,
+    'kronicle-lite put x f.md': /`kronicle-lite put` is not on the read-only list/,
+    'sea-lite next': /`sea-lite next` is not on the read-only list/,
+    'node x.js': /node/,
+    "echo 'unterminated": /unbalanced quote/,
+    'cat a ;; ls': /;;/,
+    'ls\r': /does not parse/,
+  };
+  for (const [c, re] of Object.entries(cases)) {
+    const r = classify(c);
+    assert.equal(r.ro, false, `not read-only: ${JSON.stringify(c)}`);
+    assert.match(r.why, re, `${JSON.stringify(c)}: ${r.why}`);
+  }
+});
+
+test('readonly.jq: a command over pulse_max_bytes is not read-only, and is classified fast (H2-09)', () => {
+  const big = `printf %s '${'x'.repeat(204800)}' > f; git push`;
+  const t0 = Date.now();
+  const r = classify(big);
+  assert.equal(r.ro, false);
+  assert.match(r.why, /longer than 8192 bytes/);
+  assert.ok(Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
+  assert.equal(r.head.length <= 120, true);
+  assert.equal(classify('cat a', '3').ro, false, 'pulse_max_bytes is honoured');
+});
+
+// Adversarial corpus from agent-memory-bench stress/cca/pulse-corpus.sh, 85 cases. Under
+// 0.5.1: W (world-changing) must never be read-only — denied while anything is pending;
+// Q:ro must stay read-only; Q are harmless but not read-only (denied only while pending).
+// Literal \\t / \\n are expanded like printf. tests/stress/ has the round-2 corpus too.
 const CORPUS = [
   ["W", "git push origin main", "control"],
   ["W", "git -C ../svc push origin main", "git global option before subcommand"],
@@ -70,12 +136,12 @@ const CORPUS = [
   ["W", "gh release create v1.2.3", "gh release"],
   ["W", "DRY_RUN=0 make -C infra deploy", "make -C"],
   ["Q", "git commit -m \"release notes\"", "quoted text"],
-  ["Q", "grep -r deploy src/", "read-only"],
-  ["Q", "cat deploy.yaml", "read-only"],
-  ["Q", "echo git push", "echo"],
-  ["Q", "ls deployments/", "no word boundary"],
-  ["Q", "git log --grep=release", "read-only git"],
-  ["Q", "# git push\\nls", "comment"],
+  ["Q:ro", "grep -r deploy src/", "read-only"],
+  ["Q:ro", "cat deploy.yaml", "read-only"],
+  ["Q:ro", "echo git push", "echo"],
+  ["Q:ro", "ls deployments/", "no word boundary"],
+  ["Q:ro", "git log --grep=release", "read-only git"],
+  ["Q:ro", "# git push\\nls", "comment"],
   ["Q", "npm run predeploy-check", "predeploy"],
   ["W", "git -C \"$dir\" push", "quoted -C arg"],
   ["W", "git -c \"user.name=a b\" push", "quoted -c arg with space"],
@@ -115,66 +181,27 @@ const CORPUS = [
   ["W", "exec 3>&1; git push", "exec redirect then push"],
   ["W", "coproc git push", "coproc"],
   ["Q", "git commit -m \"git push later\"", "quoted text 2"],
-  ["Q", "echo \"kubectl apply -f x\"", "echo quoted"],
-  ["Q", "grep -n 'terraform apply' README.md", "grep quoted"],
+  ["Q:ro", "echo \"kubectl apply -f x\"", "echo quoted"],
+  ["Q:ro", "grep -n 'terraform apply' README.md", "grep quoted"],
 ];
-test('pulse.jq: stress corpus — every world-changing form detected (global options, quoting, whitespace, wrappers, one-liners), no false alarms', () => {
+test('readonly.jq: stress corpus — no world-changing form reads as read-only; harmless reads stay read-only', () => {
   const bad = [];
   for (const [want, raw, note] of CORPUS) {
     // Expand escapes like printf %b: backslash-backslash, backslash-t, backslash-n (one left-to-right pass).
     const cmd = raw.replace(/\\(\\|t|n)/g, (_, c) => (c === 't' ? '\t' : c === 'n' ? '\n' : '\\'));
-    const got = analyse(cmd).world.length ? 'W' : 'Q';
-    if (got !== want) bad.push(`${want}≠${got}: ${raw} (${note})`);
+    const got = ro(cmd);
+    if (want === 'W' && got) bad.push(`world-changing read as read-only: ${raw} (${note})`);
+    if (want === 'Q:ro' && !got) bad.push(`read-only lost: ${raw} (${note}) — ${classify(cmd).why}`);
   }
   assert.deepEqual(bad, []);
 });
 
-test('pulse.jq: tool global options are skipped, read-only verbs behind them stay quiet; one-liners are flagged', () => {
-  assert.deepEqual(analyse('git --no-pager log --grep=release').world, [], 'read-only behind a global option');
-  assert.deepEqual(analyse('git -C ../svc status').world, []);
-  assert.equal(analyse('npm --prefix web publish').world.length, 1);
-  assert.equal(analyse('helm -n prod upgrade x && kubectl --kubeconfig k apply -f y').world.length, 1);
-  assert.equal(analyse("python3 -c \"import os; os.system('git push')\"").oneliner.length, 1);
-  assert.equal(analyse("perl -e 'system(\"make deploy\")'").oneliner.length, 1);
-  assert.equal(analyse("bash -lc 'git push'").oneliner.length, 1);
-  assert.deepEqual(analyse('python3 -c "print(1)"').world, [], 'a harmless one-liner is quiet');
-  assert.deepEqual(analyse('git push').oneliner, []);
-  assert.equal(analyse("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['git', 'push'])\nPY").oneliner.length, 1, 'here-doc read by an interpreter');
-  assert.deepEqual(analyse("cat <<'EOF' > notes.md\nrelease notes: git push later\nEOF").world, [], 'a here-doc written to a file is not run');
-  assert.equal(analyse('kubectl -n prod \\\n  apply -f k8s/').world.length, 1, 'line continuation');
-  assert.equal(analyse('"git" "push"').world.length, 1, 'quoted verb');
-});
-
-test('pulse.jq: chains — a world-changing step after a non-inert step is risky; cd/export/read-only steps are not', () => {
-  const f2 = analyse('./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target x');
-  assert.deepEqual(f2.world, ['./bin/migrate', './bin/deploy --target x']);
-  assert.deepEqual(f2.risky, ['./bin/migrate', './bin/deploy --target x']);
-  assert.equal(f2.head, './bin/migrate');
-  assert.deepEqual(analyse('npm test && npm publish').risky, ['npm publish']);
-  assert.deepEqual(analyse('./bin/build; ./bin/deploy').risky, ['./bin/deploy']);
-  assert.deepEqual(analyse('./bin/build\n./bin/deploy').risky, ['./bin/deploy']);
-  assert.deepEqual(analyse('./bin/build || ./bin/deploy').risky, ['./bin/deploy']);
-  assert.deepEqual(analyse('sleep 5 & ./bin/deploy').risky, ['./bin/deploy']);
-  assert.deepEqual(analyse('terraform apply && kubectl apply -f k').risky, ['kubectl apply -f k'], 'a world-changing step is itself a step');
-  for (const c of ['cd /repo && ./bin/deploy', 'export A=1; ./bin/deploy', 'git status && git push', 'ls >&2 && ./bin/deploy', 'echo go && make deploy', './bin/deploy && ./bin/notify', 'cat x | kubectl apply -f -']) {
-    assert.deepEqual(analyse(c).risky, [], `not risky: ${c}`);
+test('the stress harnesses: round-1 and round-2 corpora (tests/stress/pulse-corpus*.sh)', () => {
+  for (const f of ['pulse-corpus.sh', 'pulse-corpus2.sh']) {
+    const r = spawnSync('bash', [path.join(SCRIPTS, '..', 'tests', 'stress', f)], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /\(MISS\): 0\/\d+ +read-only lost \(LOST\): 0\/\d+ +errors: 0/);
   }
-  assert.deepEqual(analyse('(cd x && make deploy)').world.length, 1, 'subshell groups are split through');
-});
-
-test('pulse.jq: quoting — separators and keywords inside quotes are text', () => {
-  const r = analyse('./bin/deploy --target "a && b; c" --note \'release; now\'');
-  assert.equal(r.world.length, 1);
-  assert.deepEqual(r.risky, []);
-  assert.deepEqual(analyse('git commit -m "deploy: x" && git status').world, []);
-  assert.equal(analyse('bash -c "./bin/build; ./bin/deploy"').world.length, 1, 'opaque runners are matched on their whole text');
-  assert.deepEqual(analyse('echo "a\\" && ./bin/deploy"').world, [], 'escaped quote stays inside the string');
-});
-
-test('pulse.jq: pulse_match is configurable (JSON-escaped backslashes are accepted)', () => {
-  assert.equal(analyse('alembic upgrade head', 'alembic upgrade').world.length, 1);
-  assert.deepEqual(analyse('./bin/deploy', 'alembic upgrade').world, []);
-  assert.equal(analyse('./bin/ship-v2', 'ship-v\\\\d').world.length, 1);
 });
 
 function render(orient, showCosmetic = '0') {
@@ -233,7 +260,7 @@ test('push/pulse are inert when kronicle-lite is not configured: no output, no C
   const sb = sandbox();
   try {
     assert.equal(post(sb).stdout, '');
-    assert.equal(pre(sb, './bin/build && ./bin/deploy').stdout, '', 'not even the chain split without kronicle-lite');
+    assert.equal(pre(sb, './bin/build && ./bin/deploy').stdout, '', 'nothing is gated without kronicle-lite');
     assert.ok(fs.existsSync(path.join(sb.run, 'push', 'sessunit.off')));
     assert.ok(!fs.existsSync(path.join(sb.run, 'log')) || !/push|pulse/.test(fs.readFileSync(path.join(sb.run, 'log'), 'utf8')));
   } finally { sb.cleanup(); }

@@ -433,7 +433,7 @@ test('hooks.json references only scripts that exist, in exec form, with timeouts
       assert.ok(Array.isArray(h.args) && h.args.length === 1, ev);
       const rel = h.args[0].replace('${CLAUDE_PLUGIN_ROOT}/', '');
       assert.ok(fs.existsSync(path.join(ROOT, rel)), `${ev}: ${rel} exists`);
-      assert.ok(h.timeout > 0 && h.timeout <= 10, ev);
+      assert.ok(h.timeout > 0 && h.timeout <= 15, ev);
     }
   }
   assert.equal(hooks.PreCompact[0].matcher, 'manual|auto');
