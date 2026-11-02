@@ -186,14 +186,15 @@ test('bash guard: a PostToolUse whose tool_use_id was not stamped (PreToolUse di
   } finally { w.sb.cleanup(); }
 });
 
-test('bash guard fails open: a broken sea-lite prints nothing, logs once; bash_guard=0 and no sea-lite at all are inert', opts, () => {
+test('bash guard fails open: a broken sea-lite never blocks, logs once, tells the agent once; bash_guard=0 and no sea-lite at all are inert', opts, () => {
   const w = world();
   try {
     const bad = path.join(w.sb.base, 'bad-sea');
     fs.writeFileSync(bad, '#!/usr/bin/env bash\necho boom >&2; exit 3\n', { mode: 0o755 });
     const r = w.bash('sess-B', () => fs.appendFileSync(w.f('src', 'auth', 'login.ts'), 'q\n'), { envx: { CC_ANCHOR_SEA_LITE_BIN: bad } });
     assert.equal(r.status, 0);
-    assert.equal(r.stdout, '');
+    assert.match(w.ctx(r), /sea-lite is not answering right now \(sea-lite board failed \(exit 3\); the Bash guard has no claims to check against\)/, 'H2-22: told once');
+    assert.equal(w.ctx(w.bash('sess-B', () => fs.appendFileSync(w.f('src', 'auth', 'login.ts'), 'q2\n'), { envx: { CC_ANCHOR_SEA_LITE_BIN: bad } })), '', 'once per outage');
     assert.match(fs.readFileSync(path.join(w.sb.run, 'log'), 'utf8'), /bash_guard: sea-lite board failed/);
     assert.equal(w.ctx(w.bash('sess-C', () => fs.appendFileSync(w.f('src', 'auth', 'login.ts'), 'r\n'), { envx: { CC_ANCHOR_BASH_GUARD: '0' } })), '');
   } finally { w.sb.cleanup(); }

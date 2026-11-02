@@ -2,7 +2,7 @@
 // "nothing to push".
 //   * integrity.ok === false in an orient result → one top-priority warning
 //     per distinct problem, no retractions from the corrupt store, and the
-//     pulse denies world-changing commands until a fresh read says ok
+//     pulse lets only read-only Bash calls run until a fresh read says ok
 //     (pulse_mode=warn still warns). Stub CLI until kronicle-lite returns
 //     integrity:{ok:false, problem, seq} instead of throwing.
 //   * kronicle unavailable (missing / failing / timing out / non-JSON) stays
@@ -67,7 +67,7 @@ test('integrity (stub, kl contract): ok:false → one top-priority warning per d
   } finally { w.sb.cleanup(); }
 });
 
-test('integrity (stub): the pulse denies world-changing commands while it persists, warns in warn mode, allows after repair — and the parked retractions arrive', () => {
+test('integrity (stub): the pulse denies non-read-only commands while it persists, warns in warn mode, allows after repair — and the parked retractions arrive', () => {
   const w = stubWorld();
   try {
     w.start();
@@ -76,7 +76,8 @@ test('integrity (stub): the pulse denies world-changing commands while it persis
     const d = w.pre('./bin/deploy --target b');
     assert.equal(w.decision(d), 'deny');
     assert.match(w.reason(d), /did NOT run `\.\/bin\/deploy --target b` — kronicle-lite STORE INTEGRITY FAILURE at seq 6/);
-    assert.equal(w.pre('./bin/notify --channel x').stdout, '', 'non-world-changing commands still run');
+    assert.equal(w.decision(w.pre('./bin/notify --channel x')), 'deny', '0.5.1: every call that is not read-only is held back');
+    assert.equal(w.pre('cat docs/runbook.md | head -20').stdout, '', 'read-only calls still run');
     const warn = w.pre('git push origin main', { CC_ANCHOR_PULSE_MODE: 'warn' });
     assert.equal(w.decision(warn), null);
     assert.match(w.ctx(warn), /pulse \(warn\): `git push origin main` is about to run while kronicle-lite STORE INTEGRITY FAILURE/);
@@ -139,7 +140,11 @@ test('unavailable (stub printing non-JSON): fail-open, logged, one "feed offline
     for (let i = 0; i < 6; i++) outs.push(w.ctx(w.post(`c${i}`)));
     assert.deepEqual(outs.map((o) => (o ? 'A' : '-')).join(''), '---A--', 'advisory exactly once, on the 4th consecutive unreadable call');
     assert.match(outs[3], /retraction feed has been offline for 4 consecutive tool calls/);
-    assert.equal(w.pre('./bin/deploy --target b').stdout, '', 'the pulse fails open (no deny) while the feed is offline');
+    // 0.5.1 (H2-11): the store may have changed since the last answer and cannot be read → fail closed
+    const d = w.pre('./bin/deploy --target b');
+    assert.equal(w.decision(d), 'deny', 'not "nothing pending": the last answer is stale');
+    assert.match(w.reason(d), /could not be read just now/);
+    assert.equal(w.pre('cat docs/runbook.md').stdout, '', 'read-only calls still run');
     assert.match(w.log(), /orient failed|timed out/);
     // back online: the counter and the advisory latch reset
     fs.writeFileSync(path.join(w.sb.base, 'kl-stub.mjs'), good);

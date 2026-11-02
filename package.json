@@ -1,6 +1,6 @@
 {
   "name": "cc-anchor",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Claude Code plugin: an anchor card that survives context compaction.",
   "type": "module",

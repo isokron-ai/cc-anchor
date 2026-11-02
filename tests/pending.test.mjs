@@ -63,9 +63,11 @@ test('pending gate: a delivered change stays a deny until the agent re-reads the
     assert.equal(w.decision(d), 'deny', 'delivered is not reconciled');
     const r = w.reason(d);
     assert.match(r, /1 kronicle-lite change\(s\) you \(actor local-agent\) relied on are not re-read at their current version/);
-    assert.match(r, /- runbook › Runbook › Deploy \(seq \d+, superseded\/behavioral\): read "Deploy with \.\/bin\/deploy --target staging-a\." → now "Deploy with \.\/bin\/deploy --target staging-b\."; diff: .*\[-staging-a\.-\]\{\+staging-b\.\+\}/);
+    assert.match(r, /- runbook › Runbook › Deploy \(seq \d+, superseded\/behavioral; you read it at seq \d+\): read "Deploy with \.\/bin\/deploy --target staging-a\." → now "Deploy with \.\/bin\/deploy --target staging-b\."; diff: .*\[-staging-a\.-\]\{\+staging-b\.\+\}/);
     assert.match(r, /recall it again or read kronicle:\/\/docs\/runbook/, "kronicle-lite's own resolve hint");
-    assert.match(r, /acknowledging a change does not/);
+    assert.match(r, /acknowledging a change, retrying, or reading as another actor does not/);
+    assert.match(r, /only read-only Bash commands run \(cat, less, head, tail, ls, grep, rg, find/);
+    assert.equal(w.pre('cat docs/runbook.md && git log --oneline -3').stdout, '', 'read-only calls run while pending');
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'still pending on a retry');
     w.read(); // recall through the MCP server = a read by local-agent
     assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 're-reading the current version cleared it');
@@ -88,7 +90,7 @@ test('pending gate: two changes since the read show the latest version; pulse_mo
   } finally { w.sb.cleanup(); }
 });
 
-test('pending gate per subagent: a subagent that names its own actor_id is gated on its own reads, the parent on the server actor', opts, () => {
+test('pending gate per agent: the union of the configured actor and every actor_id the agent used — naming another actor never clears it', opts, () => {
   const w = world();
   try {
     w.start(); w.post('p0');
@@ -96,13 +98,44 @@ test('pending gate per subagent: a subagent that names its own actor_id is gated
     w.mcp('recall', { query: 'deploy target', actor_id: 'sub-s1' }, 'agent-s1'); // the hook learns s1's actor
     w.read('sub-s1');
     w.put(RB('staging-b'));
-    assert.equal(w.decision(w.pre('./bin/deploy --target staging-a', 'agent-s1')), 'deny', 's1 read v1 as sub-s1: pending for it');
-    assert.match(w.reason(w.pre('./bin/deploy --target staging-a', 'agent-s1')), /actor sub-s1/);
+    const d = w.pre('./bin/deploy --target staging-a', 'agent-s1');
+    assert.equal(w.decision(d), 'deny', 's1 read v1 as sub-s1 (and the server actor read it too)');
+    assert.match(w.reason(d), /2 kronicle-lite change\(s\) you relied on \(as actors local-agent, sub-s1\)/);
     w.read('sub-s1');
-    assert.equal(w.pre('./bin/deploy --target staging-b', 'agent-s1').stdout, '', 's1 re-read: clear for s1');
+    assert.match(w.reason(w.pre('./bin/deploy --target staging-b', 'agent-s1')), /1 kronicle-lite change\(s\) you \(actor local-agent\) relied on/, 's1 re-read as sub-s1: the configured actor is still pending');
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'the parent (local-agent) has not re-read: still denied');
     w.read();
-    assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '');
+    assert.equal(w.pre('./bin/deploy --target staging-b', 'agent-s1').stdout, '', 'both re-read: s1 clear');
+    assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'parent clear');
+    // H2-03c: passing another actor_id to a non-read tool after reading as the server actor
+    w.put(RB('staging-c'));
+    w.mcp('get_system_state', { actor_id: 'claude' });
+    const d2 = w.pre('./bin/deploy --target staging-c');
+    assert.equal(w.decision(d2), 'deny', 'switching actor does not clear local-agent\'s pending');
+    assert.match(w.reason(d2), /actor local-agent/);
+    assert.match(w.log(), /used kronicle actor claude; gated on it as well as local-agent/);
+  } finally { w.sb.cleanup(); }
+});
+
+test('pending gate fails closed: kronicle-lite failing while a change is known pending → deny on the last answer; nothing known pending → allow', opts, () => {
+  const w = world({ CC_ANCHOR_PUSH_TIMEOUT: '2' });
+  try {
+    w.start();
+    w.put(RB('staging-b'));
+    assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny');
+    const cfg = path.join(w.sb.run, 'push', 'sesspend.cfg');
+    const lines = fs.readFileSync(cfg, 'utf8').split('\n');
+    const hang = path.join(w.sb.base, 'hang-kl');
+    fs.writeFileSync(hang, '#!/usr/bin/env bash\nsleep 30\n', { mode: 0o755 });
+    fs.writeFileSync(cfg, `${lines[0]}\n${hang}\n${lines[2]}\n`);
+    const db = path.join(w.data, 'kronicle-lite.db');
+    const later = new Date(Date.now() + 5000); fs.utimesSync(db, later, later); // the store "changed": the gate must re-read
+    const t0 = Date.now();
+    const d = w.pre('./bin/deploy --target staging-b', null, { CC_ANCHOR_KRONICLE_LITE_BIN: hang });
+    assert.equal(w.decision(d), 'deny', 'timeout while pending: fail closed');
+    assert.ok(Date.now() - t0 < 10000, `bounded: ${Date.now() - t0} ms`);
+    assert.equal(w.pre('cat docs/runbook.md', null, { CC_ANCHOR_KRONICLE_LITE_BIN: hang }).stdout, '', 'read-only still runs');
+    assert.match(w.log(), /timed out/);
   } finally { w.sb.cleanup(); }
 });
 

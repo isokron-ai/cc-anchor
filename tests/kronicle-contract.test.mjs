@@ -97,7 +97,9 @@ for (const [label, env] of [['', {}], [' — 1-second mtime view (bash 3.2 / mac
     w.post('a'); // settles the gate after init
     const shim = path.join(w.sb.base, 'kl-shim');
     const calls = path.join(w.sb.base, 'calls');
-    fs.writeFileSync(shim, `#!/usr/bin/env bash\necho x >> ${JSON.stringify(calls)}\nexec node ${JSON.stringify(KL)} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(shim, `#!/usr/bin/env bash\necho "$1" >> ${JSON.stringify(calls)}\nexec node ${JSON.stringify(KL)} "$@"\n`, { mode: 0o755 });
+    const orients = () => fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l === 'orient').length;
+    const verifies = () => fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l === 'verify-chain').length;
     // The session's resolved CLI path is cached in <sid8>.cfg; point it at the shim.
     const cfg = path.join(w.sb.run, 'push', 'sesskl00.cfg');
     const [dd] = fs.readFileSync(cfg, 'utf8').split('\n');
@@ -106,11 +108,11 @@ for (const [label, env] of [['', {}], [' — 1-second mtime view (bash 3.2 / mac
     assert.ok(!fs.existsSync(calls), 'no orient call on an unchanged store');
     w.put(RB('staging-c'));
     assert.match(w.ctx(w.post('build')) || '', /staging-c/);
-    const n = fs.readFileSync(calls, 'utf8').trim().split('\n').length;
-    assert.equal(n, 2, 'a change costs a pulse (head) + one retractions call');
-    w.post('next'); // settle: one read-only pulse after our own orient write
+    assert.equal(orients(), 2, 'a change costs a pulse (head) + one retractions call');
+    w.post('next'); // settle: one read-only pulse after our own orient write (+ one read-only verify-chain: L2-02)
     w.post('next2');
-    assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 3, 'then quiet again');
+    assert.equal(orients(), 3, 'then quiet again');
+    assert.equal(verifies(), 1, 'the head-unchanged store write is integrity-checked once (verify-chain, read-only)');
   } finally { w.sb.cleanup(); }
 });
 
@@ -141,7 +143,7 @@ test('pulse (real CLI): a world-changing command issued straight after the push 
       w.read();
     }
     assert.equal(w.pre('./bin/deploy --target staging-c').stdout, '', 'a tool call in between (legacy) / a re-read (pending) = allowed');
-    assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'non-world-changing commands are never checked');
+    assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'nothing pending: any command runs');
   } finally { w.sb.cleanup(); }
 });
 
@@ -160,16 +162,25 @@ test('pulse (real CLI): a change that lands after the last tool call is caught b
   } finally { w.sb.cleanup(); }
 });
 
-test('pulse (real CLI): chained `a && b && deploy` is split; pulse_chain=check allows it; inert prefixes are fine', opts, () => {
+test('pulse (real CLI): nothing pending → every call runs (no chain split, no regex); something pending → only read-only calls run', opts, () => {
   const w = world();
   try {
     w.start();
-    const d = w.pre('./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target staging-a');
-    assert.equal(w.decision(d), 'deny');
-    assert.match(w.reason(d), /each of `\.\/bin\/migrate`, `\.\/bin\/deploy --target staging-a` as its own Bash call/);
-    assert.equal(w.pre('./bin/preflight && ./bin/build').stdout, '', 'the non-world-changing prefix runs');
-    assert.equal(w.pre('cd /repo && ./bin/deploy --target staging-a').stdout, '');
-    assert.equal(w.pre('./bin/build && ./bin/deploy', undefined, { CC_ANCHOR_PULSE_CHAIN: 'check' }).stdout, '');
+    for (const c of ['./bin/preflight && ./bin/build && ./bin/migrate && ./bin/deploy --target staging-a', 'npm ci && chmod +x scripts/deploy.sh', 'make && git checkout release/2.0']) {
+      assert.equal(w.pre(c).stdout, '', `nothing pending: ${c}`);
+      assert.equal(w.pre(c).stdout, '', `…and again: ${c}`);
+    }
+    w.put(RB('staging-b'));
+    for (const c of ['./bin/build', 'npm test', 'git checkout release/2.0', 'echo x > notes.md', 'TAG=v1; git push origin "$TAG"']) {
+      const d = w.pre(c);
+      assert.equal(w.decision(d), 'deny', `something pending: ${c}`);
+      assert.match(w.reason(d), /only read-only Bash commands run|not read-only/);
+      if (!CAP) w.post('reconciled'); // legacy: the deny is the delivery; set up the next case
+      if (!CAP) w.put(RB(`staging-${Math.random()}`));
+    }
+    for (const c of ['cat docs/runbook.md', 'git status && git log --oneline -3', 'grep -rn deploy docs/ 2>/dev/null | head']) {
+      assert.equal(w.decision(w.pre(c)), null, `read-only runs while pending: ${c}`);
+    }
   } finally { w.sb.cleanup(); }
 });
 
@@ -278,17 +289,16 @@ test('per-subagent cursors (real CLI): without a SubagentStart the subagent seed
   } finally { w.sb.cleanup(); }
 });
 
-test('pulse (real CLI): a world-changing interpreter one-liner is denied ONCE; the identical retry runs', opts, () => {
+test('pulse (real CLI): interpreter one-liners run when nothing is pending (0.5.0 denied them once) and are denied while something is', opts, () => {
   const w = world();
   try {
     w.start();
     const cmd = "python3 -c \"import os; os.system('git push origin main')\"";
+    assert.equal(w.pre(cmd).stdout, '', 'nothing pending: runs');
+    w.put(RB('staging-b'));
     const d = w.pre(cmd);
     assert.equal(w.decision(d), 'deny');
-    assert.match(w.reason(d), /inside an interpreter one-liner/);
-    assert.match(w.reason(d), /run this exact call again/);
-    assert.equal(w.pre(cmd).stdout, '', 'retry allowed');
-    assert.equal(w.decision(w.pre("node -e \"require('child_process').execSync('npm publish')\"")), 'deny', 'a different one-liner is denied once too');
+    assert.match(w.reason(d), /`python3` is not on the read-only list/);
   } finally { w.sb.cleanup(); }
 });
 
@@ -303,7 +313,8 @@ test('push/pulse (real CLI): an exact mtime tie (1-s filesystem, one kernel tick
     const cfg = path.join(w.sb.run, 'push', 'sesskl00.cfg');
     const [dd] = fs.readFileSync(cfg, 'utf8').split('\n');
     fs.writeFileSync(cfg, `${dd}\n${shim}\n`);
-    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0);
+    // orient reads only (a head-unchanged re-read also runs one read-only verify-chain, L2-02)
+    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l.startsWith('orient')).length : 0);
     const stamp = path.join(w.sb.run, 'push', 'sesskl00.stamp');
     const db = path.join(w.data, 'kronicle-lite.db');
     // The clock is driven explicitly (CC_ANCHOR_TEST_NOW), so no assertion

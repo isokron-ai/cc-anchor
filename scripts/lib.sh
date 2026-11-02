@@ -180,22 +180,50 @@ cc_detect_cursor() {
   return 1
 }
 
+# MCP config files that may name the kronicle-lite / sea-lite server: the
+# project's .mcp.json, ~/.claude.json and, when Claude Code runs with
+# CLAUDE_CONFIG_DIR, that directory's .claude.json (0.5.1, L2-04). Paths
+# are read one per line.
+cc_cfg_files() {
+  printf '%s\n' "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"
+  [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}/.claude.json" != "${HOME}/.claude.json" ]] && printf '%s\n' "${CLAUDE_CONFIG_DIR%/}/.claude.json"
+  return 0
+}
+
+# The project root as a physical path (symlinks resolved), "" if it does
+# not exist. ~/.claude.json keys `projects` by a path: look up both
+# spellings, the literal $CLAUDE_PROJECT_DIR and this one (0.5.1, H2-08).
+cc_root_phys() { (cd "$CC_ROOT" 2>/dev/null && pwd -P) || true; }
+
+# jq defs shared by the kronicle-lite server lookups (0.5.1, H2-01/H2-03):
+# MCP servers from .mcpServers and from .projects[<root, literal or
+# physical>].mcpServers; a server is kronicle-lite when its command line
+# (command split on blanks + args) names kronicle (npx kronicle-lite …,
+# node …/kronicle-lite/dist/cli.js, kronicle-lite serve) — whatever its key
+# — or, failing that, when its key does. opt("--x") reads `--x V` and
+# `--x=V`.
+# shellcheck disable=SC2016  # jq code, not shell
+CC_KL_SERVERS_JQ='
+def argv: ((.command // "") | tostring | split(" ") | map(select(. != ""))) + ((.args // []) | map(tostring));
+def klcmd: argv | any(ascii_downcase | test("kronicle"));
+def opt($n): argv as $a | [range(0; $a | length) as $i | if $a[$i] == $n then ($a[$i + 1] // empty) elif ($a[$i] | startswith($n + "=")) then ($a[$i] | .[($n | length) + 1:]) else empty end] | first // null;
+def servers: [(.mcpServers // {}), ((.projects // {})[$root].mcpServers // {}), (if $phys != "" then ((.projects // {})[$phys].mcpServers // {}) else {} end)] | add | to_entries;
+def klservers: servers | (map(select((.value | type) == "object" and (.value | klcmd))) + map(select((.key | ascii_downcase | test("kronicle")) and (((.value | type) != "object") or (.value | klcmd | not))))) | map(.value);
+def klopt($flag; $env): [klservers[] | select(type == "object") | (opt($flag) // .env[$env] // null) | select(. != null and . != "") | tostring] | first // empty;
+'
+
 # 0 when a kronicle-lite MCP server (or plugin) is configured for this
 # project, 1 otherwise. File-based only: `claude mcp list` spawns servers
 # and is far too slow for a hook. Override with CC_ANCHOR_KRONICLE=1|0.
 cc_kronicle_configured() {
   case "${CC_ANCHOR_KRONICLE:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
-  local f
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  local f phys; phys="$(cc_root_phys)"
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
-    if jq -e --arg root "$CC_ROOT" '
-        def hit: tostring | ascii_downcase | test("kronicle");
-        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {});
-        servers | to_entries | any(.key | hit) or any(.value | ((.command // ""), (.args // [])) | hit)
-      ' "$f" >/dev/null 2>&1; then return 0; fi
-  done
-  for f in "${HOME}/.claude/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
+    if jq -e --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klservers | length > 0' "$f" >/dev/null 2>&1; then return 0; fi
+  done < <(cc_cfg_files)
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
     [[ -s "$f" ]] || continue
     if jq -e '(.enabledPlugins // {}) | to_entries | any((.key | ascii_downcase | test("^kronicle")) and .value == true)' "$f" >/dev/null 2>&1; then return 0; fi
   done
@@ -342,16 +370,16 @@ cc_on() {
 cc_sea_configured() {
   case "${CC_ANCHOR_SEA:-}" in 1) return 0;; 0) return 1;; esac
   cc_have_jq || return 1
-  local f
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  local f phys; phys="$(cc_root_phys)"
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
-    if jq -e --arg root "$CC_ROOT" '
+    if jq -e --arg root "$CC_ROOT" --arg phys "$phys" '
         def hit: tostring | ascii_downcase | test("sea[-_]lite");
-        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {});
+        def servers: (.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {}) + (if $phys != "" then ((.projects // {})[$phys].mcpServers // {}) else {} end);
         servers | to_entries | any(.key | hit) or any(.value | ((.command // ""), (.args // [])) | hit)
       ' "$f" >/dev/null 2>&1; then return 0; fi
-  done
-  for f in "${HOME}/.claude/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
+  done < <(cc_cfg_files)
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" "$CC_ROOT/.claude/settings.json" "$CC_ROOT/.claude/settings.local.json"; do
     [[ -s "$f" ]] || continue
     if jq -e '(.enabledPlugins // {}) | to_entries | any((.key | ascii_downcase | test("^sea[-_]lite")) and .value == true)' "$f" >/dev/null 2>&1; then return 0; fi
   done
@@ -372,8 +400,8 @@ cc_find_cli() {
   # Last: the npx cache. The isokron-plugins marketplace launches the MCP
   # servers with `npx -y <name>@<pin> serve`, so a plugin-only install has
   # the CLI there and nowhere else.
-  for f in "${HOME}"/.claude/plugins/cache/*/"$name"/*/node_modules/"$name"/dist/cli.js \
-           "${HOME}"/.claude/plugins/cache/*/*/*/node_modules/"$name"/dist/cli.js \
+  for f in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/*/"$name"/*/node_modules/"$name"/dist/cli.js \
+           "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/*/*/*/node_modules/"$name"/dist/cli.js \
            "${CC_ROOT}"/node_modules/"$name"/dist/cli.js \
            "${npm_config_cache:-${HOME}/.npm}"/_npx/*/node_modules/"$name"/dist/cli.js; do
     [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
@@ -602,7 +630,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_FAILED=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_ACTOR_SRC=""; CC_KL_FAILED=0; CC_KL_XFAIL=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -658,60 +686,124 @@ cc_kl_seed() {
   cc_kl_init
 }
 
-# cc_kl_forget — drop a stopped subagent's cursor files.
+# cc_kl_forget — drop a stopped subagent's cursor files (not its actors).
 cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
   rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" \
-        "$CC_KL_B.actor" "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" 2>/dev/null || true
+        "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" "$CC_KL_B".xp-* 2>/dev/null || true
+  # The actors it read as (<B>.actors, and 0.5.0's <B>.actor) stay: a resumed
+  # subagent comes back with the same agent_id, and what it read before the
+  # stop is still pending for it (0.5.1, H2-10).
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
-# CC_ANCHOR_KRONICLE_DATA_DIR > config kronicle_data_dir > the kronicle MCP
-# server's --data-dir / KRONICLE_LITE_DATA_DIR in .mcp.json or ~/.claude.json
-# > $KRONICLE_LITE_DATA_DIR > "" (the CLI's own default, ~/.kronicle-lite).
+# CC_ANCHOR_KRONICLE_DATA_DIR > config kronicle_data_dir > the kronicle-lite
+# MCP server's --data-dir DIR / --data-dir=DIR / env KRONICLE_LITE_DATA_DIR in
+# .mcp.json or ~/.claude.json (see CC_KL_SERVERS_JQ) > $KRONICLE_LITE_DATA_DIR
+# > "" (the CLI's own default, ~/.kronicle-lite).
 cc_kl_data_dir() {
-  local v f
+  local v f phys
   v="${CC_ANCHOR_KRONICLE_DATA_DIR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
   v="$(cc_cfg_raw kronicle_data_dir)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  phys="$(cc_root_phys)"
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
-    v="$(jq -r --arg root "$CC_ROOT" '
-        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
-        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
-        | map(((.args // []) | index("--data-dir") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_DATA_DIR // empty)
-        | first // empty' "$f" 2>/dev/null)"
+    v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--data-dir"; "KRONICLE_LITE_DATA_DIR")' "$f" 2>/dev/null)"
     [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  done
+  done < <(cc_cfg_files)
   printf '%s' "${KRONICLE_LITE_DATA_DIR:-}"
 }
 
 # The actor whose reads count for kronicle-lite's `pending` (0.8.0): the
 # agent's MCP server actor. CC_ANCHOR_KRONICLE_ACTOR > config kronicle_actor
-# > the kronicle server's --actor / KRONICLE_LITE_ACTOR in .mcp.json or
-# ~/.claude.json > $KRONICLE_LITE_ACTOR > "local-agent" (the server default).
+# > the kronicle-lite server's --actor ID / --actor=ID / env
+# KRONICLE_LITE_ACTOR in .mcp.json or ~/.claude.json > $KRONICLE_LITE_ACTOR >
+# "local-agent" (the server default). Prints "<actor>\x1f<named|default>":
+# default = found nowhere, a guess (0.5.1, L2-04: the gate then also keeps
+# the retraction rule and says how to name the actor).
 cc_kl_actor_detect() {
-  local v f
-  v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  for f in "$CC_ROOT/.mcp.json" "${HOME}/.claude.json"; do
+  local v f phys
+  v="${CC_ANCHOR_KRONICLE_ACTOR:-}"; [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
+  v="$(cc_cfg_raw kronicle_actor)"; [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
+  phys="$(cc_root_phys)"
+  while IFS= read -r f; do
     [[ -s "$f" ]] || continue
-    v="$(jq -r --arg root "$CC_ROOT" '
-        ((.mcpServers // {}) + ((.projects // {})[$root].mcpServers // {})) | to_entries
-        | map(select((.key | ascii_downcase | test("kronicle")) or ((.value.args // []) | tostring | test("kronicle"))) | .value)
-        | map(((.args // []) | index("--actor") as $i | if $i == null then null else .[$i + 1] end) // .env.KRONICLE_LITE_ACTOR // empty)
-        | first // empty' "$f" 2>/dev/null)"
-    [[ -n "$v" ]] && { printf '%s' "$v"; return 0; }
-  done
-  printf '%s' "${KRONICLE_LITE_ACTOR:-local-agent}"
+    v="$(jq -r --arg root "$CC_ROOT" --arg phys "$phys" "$CC_KL_SERVERS_JQ"' klopt("--actor"; "KRONICLE_LITE_ACTOR")' "$f" 2>/dev/null)"
+    [[ -n "$v" ]] && { printf '%s\x1fnamed' "$v"; return 0; }
+  done < <(cc_cfg_files)
+  if [[ -n "${KRONICLE_LITE_ACTOR:-}" ]]; then printf '%s\x1fnamed' "$KRONICLE_LITE_ACTOR"; else printf 'local-agent\x1fdefault'; fi
 }
 
-# The effective actor for THIS agent: one it named itself in a kronicle-lite
-# tool call (actor_id, learned by the PostToolUse hook) wins over the
-# session's server actor. Builtins only.
-cc_kl_agent_actor() {
-  local a=""
-  [[ -s "$CC_KL_B.actor" ]] && IFS= read -r a < "$CC_KL_B.actor"
-  printf '%s' "${a:-$CC_KL_ACTOR}"
+# The actor `orient --pending-actor` reports on: the session's configured
+# server actor. Every OTHER actor_id this agent has passed to an MCP tool is
+# in <B>.actors and checked too (cc_kl_extra_pending): the gate is on the
+# union, and naming another actor never clears what this one has pending
+# (0.5.1, H2-03c). Builtins only.
+cc_kl_agent_actor() { printf '%s' "$CC_KL_ACTOR"; }
+
+# 0.5.1 (L2-04): what to tell the agent when the server actor is a guess.
+cc_kl_actor_note() {
+  printf '%s' "cc-anchor does not know which kronicle-lite actor your MCP server reads as — none is named in .mcp.json or ~/.claude.json (a --mcp-config file or a plugin server is not visible to hooks) — so it checks \`${CC_KL_ACTOR}\` plus every new retraction. Set CC_ANCHOR_KRONICLE_ACTOR (or kronicle_actor in .claude/cc-anchor.json) to the server's --actor for the full pending gate."
+}
+
+# cc_kl_learn_actor <PostToolUse payload> — remember an actor_id the agent
+# passed in tool_input of ANY MCP tool (the kronicle-lite server may be
+# registered under any key, or as a plugin: mcp__<anything>__*). Adding an
+# id that is not a kronicle-lite actor costs one `pending` read that finds
+# nothing; missing one would let reads under it go unchecked (H2-03d).
+cc_kl_learn_actor() {
+  [[ "$1" == *'"actor_id"'* && "$1" =~ \"tool_name\":[[:space:]]*\"mcp__ ]] || return 0
+  local na; na="$(jq -r '.tool_input.actor_id // empty | tostring | gsub("[[:cntrl:]]"; "")' <<<"$1" 2>/dev/null)"
+  [[ -n "$na" && "$na" != "$CC_KL_ACTOR" ]] || return 0
+  if [[ -s "$CC_KL_B.actors" ]] && grep -Fxq -- "$na" "$CC_KL_B.actors" 2>/dev/null; then return 0; fi
+  printf '%s\n' "$na" >> "$CC_KL_B.actors" 2>/dev/null || return 0
+  cc_log "push: agent ${CC_KL_AGENT:-main} used kronicle actor ${na:0:64}; gated on it as well as ${CC_KL_ACTOR}"
+}
+
+# File for an extra actor's last `pending` read (same format as <B>.klpend).
+cc_kl_xp_file() {
+  if (( ${#1} <= 64 )) && [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; then printf '%s' "$CC_KL_B.xp-$1"
+  else printf '%s' "$CC_KL_B.xp-h$(cc_hash "$1")"; fi
+}
+
+# cc_kl_extra_pending — refresh the pending reads of the extra actors that
+# have none since the store last changed (cc_kl_pending_note drops them on
+# every fresh briefing), all in parallel, each bounded by push_timeout.
+# A read that fails leaves no file: that actor counts as unknown (the CLI is
+# failing; logged), the last known answer of the others still stands.
+cc_kl_extra_pending() {
+  # A session started under 0.5.0 kept one learned actor in <B>.actor.
+  if [[ -s "$CC_KL_B.actor" ]]; then cat "$CC_KL_B.actor" >> "$CC_KL_B.actors" 2>/dev/null && rm -f "$CC_KL_B.actor"; fi
+  [[ -s "$CC_KL_B.actors" && -e "$CC_KL_S.klcap" ]] || return 0
+  local a f to pcwd n=0; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  local -a todo=() bg=()
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    f="$(cc_kl_xp_file "$a")"
+    [[ -s "$f" ]] || todo+=("$a")
+  done < "$CC_KL_B.actors"
+  (( ${#todo[@]} > 0 )) || return 0
+  pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
+  for a in "${todo[@]}"; do
+    f="$(cc_kl_xp_file "$a")"
+    (
+      args=(pending --actor "$a" --json --cwd "${pcwd:-$CC_ROOT}")
+      [[ -n "$CC_KL_DD" ]] && args+=(--data-dir "$CC_KL_DD")
+      if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${args[@]}" > "$f.raw.$$" 2>/dev/null
+      else cc_with_timeout "$to" "$CC_KL_BIN" "${args[@]}" > "$f.raw.$$" 2>/dev/null; fi
+    ) &
+    bg+=($!)
+  done
+  wait "${bg[@]}" 2>/dev/null
+  for a in "${todo[@]}"; do
+    f="$(cc_kl_xp_file "$a")"
+    local r=""; [[ -s "$f.raw.$$" ]] && r="$(cc_kl_pending_fmt "$(cat "$f.raw.$$")")"
+    rm -f "$f.raw.$$" 2>/dev/null
+    if [[ -n "$r" && "$r" != nocap ]]; then printf '%s\n' "$r" > "$f" 2>/dev/null; else n=$((n + 1)); fi
+  done
+  CC_KL_XFAIL=$n
+  (( n > 0 )) && cc_log_once kl_xperr "pulse: kronicle-lite pending could not be read for ${n} extra actor(s); last known answers stand"
+  return 0
 }
 
 # cc_kl_enabled — 0 when the push/pulse should run for this session (and
@@ -723,8 +815,9 @@ cc_kl_enabled() {
   local sw; sw="$(cc_cfg_raw push)"
   case "$sw" in 0|false|no|off) return 1;; esac
   if [[ -s "$CC_KL_S.cfg" ]]; then
-    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; IFS= read -r CC_KL_ACTOR; } < "$CC_KL_S.cfg"
-    [[ -n "$CC_KL_ACTOR" ]] || CC_KL_ACTOR="$(cc_kl_actor_detect)"
+    { IFS= read -r CC_KL_DD; IFS= read -r CC_KL_BIN; IFS= read -r CC_KL_ACTOR; IFS= read -r CC_KL_ACTOR_SRC; } < "$CC_KL_S.cfg"
+    [[ -n "$CC_KL_ACTOR" ]] || IFS=$'\x1f' read -r CC_KL_ACTOR CC_KL_ACTOR_SRC <<<"$(cc_kl_actor_detect)"
+    [[ -n "$CC_KL_ACTOR_SRC" ]] || CC_KL_ACTOR_SRC=named
     [[ -n "$CC_KL_BIN" ]] && return 0
   fi
   [[ -e "$CC_KL_S.off" ]] && return 1
@@ -738,8 +831,8 @@ cc_kl_enabled() {
     cc_log_once kl_nobin "push: kronicle-lite is configured but its CLI was not found (PATH, plugin cache, CC_ANCHOR_KRONICLE_LITE_BIN); retraction push/pulse off"
     return 1; }
   CC_KL_DD="$(cc_kl_data_dir)"
-  CC_KL_ACTOR="$(cc_kl_actor_detect)"
-  printf '%s\n%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" "$CC_KL_ACTOR" > "$CC_KL_S.cfg" 2>/dev/null || return 1
+  IFS=$'\x1f' read -r CC_KL_ACTOR CC_KL_ACTOR_SRC <<<"$(cc_kl_actor_detect)"
+  printf '%s\n%s\n%s\n%s\n' "$CC_KL_DD" "$CC_KL_BIN" "$CC_KL_ACTOR" "$CC_KL_ACTOR_SRC" > "$CC_KL_S.cfg" 2>/dev/null || return 1
   return 0
 }
 
@@ -757,8 +850,10 @@ cc_kl_orient() {
   local pcwd; pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
   local -a a=(orient --json --actor "cc-anchor-$CC_KL_SID" --pending-actor "$(cc_kl_agent_actor)" --cwd "${pcwd:-$CC_ROOT}")
   [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
-  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null
-  else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>/dev/null; fi
+  # stderr is kept (last call only) so a failure can be told apart: a corrupt
+  # store is not "offline" (cc_kl_fail; 0.5.1, L2-03).
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" "$@" 2>"$CC_KL_S.stderr"
+  else cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" "$@" 2>"$CC_KL_S.stderr"; fi
 }
 
 # Unavailable bookkeeping: every push/pulse call that could not read the
@@ -769,6 +864,7 @@ cc_kl_down() {
   printf '%s\n' "$((n + 1))" > "$CC_KL_S.down" 2>/dev/null || true
 }
 cc_kl_up() {
+  [[ -e "$CC_KL_S.unavailwarned" ]] && rm -f "$CC_KL_S.unavailwarned" 2>/dev/null
   [[ -e "$CC_KL_S.down" ]] || return 0
   rm -f "$CC_KL_S.down" "$CC_KL_S.downwarned" 2>/dev/null
   cc_log "push: kronicle-lite readable again; retraction feed back online"
@@ -810,20 +906,28 @@ cc_kl_integrity_from() {
 #                            "- …" line per item (at most 6)
 # Builtins + one jq. A briefing without pending_count (kronicle-lite <= 0.7.0)
 # switches the gate back to the retraction-since-last-look logic.
-cc_kl_pending_note() {
-  local r
-  r="$(jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
+# cc_kl_pending_fmt <orient or `pending --json` output> prints that text, or
+# "nocap" for a briefing without pending_count.
+cc_kl_pending_fmt() {
+  jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
     if (.pending_count | type) != "number" then "nocap" else
-      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
+      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // .actor_id // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
       ((.pending // [])[0:6][] |
         "- " + ([(.doc_slug // empty), ((.heading_path // []) | map(tostring) | join(" › ") | select(. != ""))] | join(" › "))
-        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")): read \"\(.old_text // "?" | clip(120))\" → "
+        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")"
+        + (if (.read.head_seq // null) != null then "; you read it at seq \(.read.head_seq)" else "" end) + ")"
+        + ": read \"\(.old_text // "?" | clip(120))\" → "
         + (if .current == null then "now REMOVED" else "now \"\(.new_text // "?" | clip(120))\"" end)
         + (if .diff != null then "; diff: \(.diff | clip(200))" else "" end)
         + (if (.derived_notes // []) | length > 0 then "; your notes derived from it: \((.derived_notes | map(if type == "object" then (.doc_slug // .slug // .block_id // "?") else tostring end) | join(", ")) | clip(120))" else "" end)
         + (if .resolve != null then " — \(.resolve | clip(160))" else "" end)),
-      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // "?"))" else empty end)
-    end' <<<"$1" 2>/dev/null)" || return 0
+      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // .actor_id // "?"))" else empty end)
+    end' <<<"$1" 2>/dev/null
+}
+
+cc_kl_pending_note() {
+  local r
+  r="$(cc_kl_pending_fmt "$1")" || return 0
   if [[ "$r" == nocap ]]; then
     [[ -e "$CC_KL_S.klcap" ]] && rm -f "$CC_KL_S.klcap" 2>/dev/null
     [[ -e "$CC_KL_B.klpend" ]] && rm -f "$CC_KL_B.klpend" 2>/dev/null
@@ -833,6 +937,10 @@ cc_kl_pending_note() {
   [[ -n "$r" ]] || return 0
   [[ -e "$CC_KL_S.klcap" ]] || { : > "$CC_KL_S.klcap"; rm -f "$CC_KL_S.klnocap" 2>/dev/null; }
   printf '%s\n' "$r" > "$CC_KL_B.klpend.$$" 2>/dev/null && mv -f "$CC_KL_B.klpend.$$" "$CC_KL_B.klpend"
+  # A fresh briefing means the store may have changed: the extra actors'
+  # answers are re-read the next time the gate needs them.
+  [[ -s "$CC_KL_B.actors" ]] && rm -f "$CC_KL_B".xp-* 2>/dev/null
+  return 0
 }
 
 # Pending count for this agent from the last briefing ("" = unknown).
@@ -855,6 +963,17 @@ cc_kl_fail() {  # rc — remember a failure (60 s back-off), log once per hour
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_KL_S.fail" 2>/dev/null || true
   CC_KL_FAILED=1
+  # 0.5.1 (L2-03): a store that cannot be opened because it is damaged
+  # (exit 77, SQLite CORRUPT / NOTADB, "malformed", "not a database") is an
+  # integrity failure, not an outage: the push warns at once (top priority)
+  # and the pulse lets only read-only calls run — instead of failing open
+  # and advising "offline" after push_offline_after calls.
+  local err=""; [[ -s "$CC_KL_S.stderr" ]] && err="$(head -c 400 "$CC_KL_S.stderr" 2>/dev/null | tr '\n' ' ')"
+  if [[ "$1" == 77 ]] || [[ "$err" =~ (SQLITE_CORRUPT|SQLITE_NOTADB|[Mm]alformed|not a database|integrity|hash mismatch|corrupt) ]]; then
+    cc_kl_integrity_note "?" "the store cannot be read (kronicle-lite exit $1: ${err:0:200})"
+    cc_log_once kl_corrupt "push: kronicle-lite store looks damaged (exit $1); treating it as an integrity failure"
+    return 0
+  fi
   cc_kl_down
   if [[ "$1" == 124 ]]; then cc_log_once kl_timeout "push: kronicle-lite orient timed out (push_timeout); failing open"
   else cc_log_once kl_err "push: kronicle-lite orient failed (exit $1); failing open"; fi
@@ -869,8 +988,8 @@ cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
 }
 
 # cc_kl_init — start this session's cursor at the current head (silent).
-cc_kl_init() {
-  cc_kl_backoff && return 1
+cc_kl_init() {  # [strict] — the pulse reads even inside the back-off
+  [[ "${1:-}" == strict ]] || { cc_kl_backoff && return 1; }
   local pre="$CC_KL_B.stamp.$$" out rc cur seq
   cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?
@@ -961,14 +1080,17 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
     # Main agent without a cursor: start at the head (nothing is "new" yet).
     # Subagent without one (no SubagentStart seen): seed from the parent and
     # go on to fetch, so what the parent has not consumed reaches it too.
-    if [[ -z "$CC_KL_AGENT" || ! -s "$CC_KL_S.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
+    if [[ -z "$CC_KL_AGENT" || ! -s "$CC_KL_S.cursor" ]]; then cc_kl_init "${1:-}" || CC_KL_FAILED=1; return 1; fi
     cc_kl_seed || { CC_KL_FAILED=1; return 1; }
   fi
   # Parked at a corrupt head and the store has since been found ok (by any
   # agent of the session): re-read from the unmoved cursor.
   if [[ -e "$CC_KL_B.parked" && ! -e "$CC_KL_S.integrity" ]]; then rm -f "$CC_KL_B.parked" "$CC_KL_B.seq" "$CC_KL_B.stamp" 2>/dev/null; fi
   cc_kl_unchanged "${1:-}" && return 1
-  cc_kl_backoff && return 1
+  # The push honours the 60 s back-off after a failure; the pulse (strict)
+  # never does: a cached answer from before the store changed is not an
+  # answer (0.5.1, H2-11).
+  [[ "${1:-}" == strict ]] || { cc_kl_backoff && return 1; }
   local pre="$CC_KL_B.stamp.$$" out rc seq stored="" cur=""
   cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?
@@ -978,7 +1100,16 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   cc_kl_integrity_from "$out" || true
   cc_kl_pending_note "$out"
   [[ -s "$CC_KL_B.seq" ]] && IFS= read -r stored < "$CC_KL_B.seq"
-  if [[ -n "$seq" && "$seq" == "$stored" ]]; then mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up; return 1; fi
+  if [[ -n "$seq" && "$seq" == "$stored" ]]; then
+    # 0.5.1 (L2-02): the store changed but the head did not move — a
+    # rewrite of a stored block or event (projection-only tamper) does
+    # exactly that, and `--focus pulse` carries no integrity verdict. Check
+    # with the read-only `verify-chain` (the retractions focus would answer
+    # too, but it writes the store and every call would re-read).
+    mv -f "$pre" "$CC_KL_B.stamp"; cc_kl_up
+    cc_kl_verify
+    return 1
+  fi
   IFS= read -r cur < "$CC_KL_B.cursor"
   out="$(cc_kl_orient --cursor "$cur" --focus retractions)"; rc=$?
   if (( rc != 0 )) || [[ -z "$out" ]]; then rm -f "$pre"; cc_kl_fail "$rc"; return 1; fi
@@ -1020,10 +1151,33 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   return 0
 }
 
+# cc_kl_verify — `kronicle-lite verify-chain` (read-only), bounded by
+# push_timeout: exit 1 notes an integrity failure (first mismatch, or the
+# summary line), exit 0 clears one, anything else (slow on a big store, an
+# old CLI) is inconclusive and changes nothing (logged once).
+cc_kl_verify() {
+  local to out rc prob; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  local -a a=(verify-chain); [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then out="$(cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" 2>"$CC_KL_S.stderr")"; rc=$?
+  else out="$(cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" 2>"$CC_KL_S.stderr")"; rc=$?; fi
+  case "$rc" in
+    0) [[ "$out" == *'"ok": true'* || "$out" == *'"ok":true'* ]] && cc_kl_integrity_note ok;;
+    1)
+      prob="$(jq -r 'if (.projection.mismatches // []) | length > 0 then (.projection.mismatches[0] | "\(.table // "?") \(.key // "?") \(.field // ""): \(.detail // "projection mismatch")")
+        elif .first_mismatch != null then "chain mismatch at \(.first_mismatch | if type == "object" then (.seq // tostring) else tostring end)"
+        else "verify-chain failed" end | gsub("\\s+"; " ") | .[0:240]' <<<"$out" 2>/dev/null)"
+      [[ -n "$prob" ]] || prob="$(head -c 240 "$CC_KL_S.stderr" 2>/dev/null | tr '\n' ' ')"
+      cc_kl_integrity_note "?" "${prob:-verify-chain failed}: the store does not match its chain";;
+    *) cc_log_once kl_verify "push: kronicle-lite verify-chain inconclusive (exit $rc); integrity not re-checked";;
+  esac
+  return 0
+}
+
 cc_kl_integrity_text() {
   local s="?" p="integrity check failed"
   [[ -s "$CC_KL_S.integrity" ]] && IFS=$'\x1f' read -r s p < "$CC_KL_S.integrity"
-  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE at seq ${s}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). The cc-anchor pulse blocks world-changing commands meanwhile (unless pulse_mode is warn)."
+  local at=""; [[ "$s" =~ ^[0-9]+$ ]] && at=" at seq ${s}"
+  printf '%s' "cc-anchor: kronicle-lite STORE INTEGRITY FAILURE${at}: ${p}. The chain is corrupt or was tampered with: do not act on runbooks, notes or anything else recalled from kronicle-lite until it is resolved (kronicle-lite verify-chain / doctor; tell the operator). Meanwhile the cc-anchor pulse lets only read-only Bash commands run (unless pulse_mode is warn)."
 }
 
 # cc_kl_integrity_recheck — re-read integrity now (bypassing the mtime gate):
@@ -1052,12 +1206,9 @@ cc_kl_push() {
   cc_kl_session "$sid" "$(cc_payload_agent "$payload")"
   [[ -e "$CC_KL_S.off" ]] && return 0
   cc_kl_enabled || return 0
-  # The agent named its own kronicle-lite actor in a tool call: its pending
-  # list is that actor's (per agent: a subagent may use its own actor_id).
-  if [[ "$payload" =~ \"tool_name\":[[:space:]]*\"mcp__[^\"]*kronicle[^\"]*\" && "$payload" == *'"actor_id"'* ]]; then
-    local na; na="$(jq -r '.tool_input.actor_id // empty | tostring' <<<"$payload" 2>/dev/null)"
-    if [[ -n "$na" && "$na" != "$(cc_kl_agent_actor)" ]]; then printf '%s\n' "$na" > "$CC_KL_B.actor" 2>/dev/null; rm -f "$CC_KL_B.klpend" "$CC_KL_B.stamp" 2>/dev/null; fi
-  fi
+  # The agent named a kronicle-lite actor in an MCP tool call: the gate
+  # checks that actor too, from now on (union, per agent; 0.5.1).
+  cc_kl_learn_actor "$payload"
   # The agent got a tool call in since the last push: what it was told is no
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
@@ -1110,6 +1261,12 @@ cc_kl_push() {
 ${KL_BODY}
 Re-read the affected document (recall, or get_system_state with your cursor) and use the current text before you act on it."
   if (( KL_COS > 0 )) && ! cc_on push_cosmetic 0; then CC_KL_CONTEXT="${CC_KL_CONTEXT} (${KL_COS} cosmetic edit(s) not shown.)"; fi
+  # L2-04: said once per session, with the first change it matters for.
+  if [[ "$CC_KL_ACTOR_SRC" == default && ! -e "$CC_KL_S.actorwarned" ]]; then
+    : > "$CC_KL_S.actorwarned" 2>/dev/null || true
+    CC_KL_CONTEXT="${CC_KL_CONTEXT}
+$(cc_kl_actor_note)"
+  fi
   (( KL_BLOCK > 0 )) && printf '%s\n' "$KL_BODY" > "$CC_KL_B.pending"
   cc_log "push: ${KL_SHOWN} retraction(s) (${KL_BLOCK} blocking, ${KL_COS} cosmetic) at seq ${KL_SEQ}"
   return 0
@@ -1162,17 +1319,27 @@ cc_bg_enabled() {
     *) if [[ ! -s "$CC_CLAIMS" ]] && ! cc_sea_configured; then : > "$CC_BG_B.off"; return 1; fi;;
   esac
   if ! cc_find_cli sea-lite >/dev/null; then
-    : > "$CC_BG_B.off"
+    : > "$CC_BG_B.off"; : > "$CC_BG_B.nobin"
     cc_log_once bg_nobin "bash_guard: sea-lite CLI not found; Bash-changed paths are not checked against claims"
     return 1
   fi
   : > "$CC_BG_B.on"
 }
 
-cc_bg_tid() {  # <payload> — sanitized tool_use_id ("" when absent)
+# 0 when the Bash payload's command starts background work: a `&` that is
+# not part of && |& >& &>, or nohup / setsid / disown. jq only when the
+# payload contains one of them at all.
+cc_bg_starts_job() {
+  [[ "$1" == *'&'* || "$1" =~ (nohup|setsid|disown) ]] || return 1
+  local bc; bc="$(jq -r '.tool_input.command // "" | tostring' <<<"$1" 2>/dev/null)"
+  [[ "$bc" =~ (^|[^\&\|\>])\&([^\&\>]|$) || "$bc" =~ (^|[^A-Za-z0-9_-])(nohup|setsid|disown)([^A-Za-z0-9_-]|$) ]]
+}
+
+cc_bg_tid() {  # <payload> — sanitized tool_use_id ("notid" when absent: one
+  # stamp per session then, so overlapping id-less calls share it)
   local t=""
   [[ "$1" =~ \"tool_use_id\":[[:space:]]*\"([^\"]*)\" ]] && t="${BASH_REMATCH[1]}"
-  t="${t//[^A-Za-z0-9_-]/}"; printf '%s' "${t:0:64}"
+  t="${t//[^A-Za-z0-9_-]/}"; t="${t:0:64}"; printf '%s' "${t:-notid}"
 }
 
 # PreToolUse(Bash): stamp the start of THIS call (one builtin write).
@@ -1185,6 +1352,39 @@ cc_bg_prestamp() {  # <payload>
   [[ -n "$tid" ]] || return 0
   [[ -d "$CC_BG_D" ]] || mkdir -p "$CC_BG_D" 2>/dev/null || return 0
   : > "$CC_BG_B.pre.$tid" 2>/dev/null || true
+  if cc_bg_starts_job "$payload"; then : > "$CC_BG_B.bgjob.$tid" 2>/dev/null || true; fi
+  # 0.5.1 (H2-18): which claimed paths exist right now (builtins), so a path
+  # removed through its parent (rm -rf src, mv src x, a checkout) is known
+  # to have existed before this call.
+  if [[ -s "$CC_BG_D/claims.tsv" ]]; then
+    local ses path rest; local -a ex=()
+    while IFS=$'\x1f' read -r ses path rest; do [[ -n "$path" && -e "$path" ]] && ex+=("$path"); done < "$CC_BG_D/claims.tsv"
+    if (( ${#ex[@]} > 0 )); then printf '%s\n' "${ex[@]}" > "$CC_BG_B.present.$tid" 2>/dev/null || true; fi
+  fi
+}
+
+# 0.5.1 (H2-20/H2-22): when sea-lite cannot answer, the claim guards fail
+# open — and say so ONCE per outage per session (the Edit/Write scope guard
+# and the Bash guard share the latch <run>/sea-advised.<sid8>), like the
+# kronicle-lite "feed offline" advisory. cc_sea_advise <session> <why> sets
+# CC_SEA_ADVICE and returns 0 when the agent should be told now.
+CC_SEA_ADVICE=""
+cc_sea_advise() {
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  local latch="$CC_RUN/sea-advised.${s:-nosession}"
+  CC_SEA_ADVICE=""
+  [[ -e "$latch" ]] && return 1
+  cc_ensure_dirs || return 1
+  : > "$latch" 2>/dev/null || return 1
+  cc_log "sea-lite unavailable (${2}); advised the agent once"
+  CC_SEA_ADVICE="cc-anchor: sea-lite is not answering right now (${2}). The claim guards are NOT checking your edits against other agents' sea-lite claims until it does (the Edit/Write scope guard allows every edit; the Bash guard uses the last claims it saw, if any). Check \`sea-lite board\` yourself before editing files another agent may hold."
+  return 0
+}
+cc_sea_recovered() {
+  local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; s="${s:0:8}"
+  [[ -e "$CC_RUN/sea-advised.${s:-nosession}" ]] || return 0
+  rm -f "$CC_RUN/sea-advised.${s:-nosession}" 2>/dev/null
+  cc_log "sea-lite answering again; claim guards checking"
 }
 
 cc_bg_seadb() { printf '%s' "${CC_ANCHOR_SEA_DATA_DIR:-${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}}/kronicle-lite.db"; }
@@ -1195,22 +1395,32 @@ cc_bg_refresh() {
   local now; cc_epoch_now_var now
   printf '%s\n' "$now" > "$CC_BG_D/claims.at" 2>/dev/null || return 1
   # Drop per-call stamps whose PostToolUse never came (older than 10 min).
-  find "$CC_BG_D" -maxdepth 1 -name '*.pre.*' -mmin +10 -exec rm -f {} + 2>/dev/null || true
-  local bin to out rc
-  bin="$(cc_find_cli sea-lite)" || { : > "$CC_BG_D/claims.tsv"; return 1; }
+  find "$CC_BG_D" -maxdepth 1 \( -name '*.pre.*' -o -name '*.present.*' -o -name '*.bgjob.*' \) -mmin +10 -exec rm -f {} + 2>/dev/null || true
+  local bin to out rc ttl
+  bin="$(cc_find_cli sea-lite)" || { printf '127\n' > "$CC_BG_D/claims.degraded"; return 1; }
   to="$(cc_cfg_raw scope_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=4
   local -a args=(board --json)
   [[ -n "${CC_ANCHOR_SEA_DATA_DIR:-}" ]] && args+=(--data-dir "$CC_ANCHOR_SEA_DATA_DIR")
   if [[ "$bin" == *.js || "$bin" == *.mjs ]]; then out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" node "$bin" "${args[@]}" 2>/dev/null)"; rc=$?
   else out="$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout "$to" "$bin" "${args[@]}" 2>/dev/null)"; rc=$?; fi
+  if (( rc != 0 )) || [[ -z "$out" ]] || [[ "$out" != *'"tickets"'* ]]; then
+    # 0.5.1 (H2-20): one slow or failed board call no longer empties the
+    # cache for bash_guard_ttl. The last good claims stay in use (their age
+    # is in claims.good), the next refresh is tried after 5 s, and the agent
+    # is told once per outage (cc_sea_advise) that the guard is degraded.
+    # With no good claims to fall back on, the next call retries at once.
+    ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
+    local wait=5; [[ -e "$CC_BG_D/claims.good" ]] || wait=1   # nothing to fall back on: retry at once
+    printf '%s\n' "$((now - ttl + wait))" > "$CC_BG_D/claims.at" 2>/dev/null || true
+    printf '%s\n' "$rc" > "$CC_BG_D/claims.degraded" 2>/dev/null || true
+    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); using the last claims seen, retrying in 5 s"
+    return 1
+  fi
   # The board call itself may write the store: stamp the cache AFTER it, so
   # only a later write (a new claim by anyone) looks newer.
   : > "$CC_BG_D/claims.stamp" 2>/dev/null || true
-  if (( rc != 0 )) || [[ -z "$out" ]]; then
-    : > "$CC_BG_D/claims.tsv"
-    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); not checking until the next refresh"
-    return 1
-  fi
+  rm -f "$CC_BG_D/claims.degraded" 2>/dev/null
+  printf '%s\n' "$now" > "$CC_BG_D/claims.good" 2>/dev/null || true
   # sea-lite reports the project by its physical path (macOS: /private/var/…
   # for /var/…); rewrite it to this hook's spelling of the root so finds and
   # messages use the paths the agent sees.
@@ -1226,16 +1436,74 @@ cc_bg_refresh() {
 
 # 0 when the claims cache must be refreshed (builtins only).
 cc_bg_stale() {
-  [[ -e "$CC_BG_D/claims.tsv" && -e "$CC_BG_D/claims.stamp" ]] || return 0
+  [[ -e "$CC_BG_D/claims.at" ]] || return 0
   local ttl at=0 now; ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
   cc_epoch_now_var now
   [[ -s "$CC_BG_D/claims.at" ]] && IFS= read -r at < "$CC_BG_D/claims.at"
   [[ "$at" =~ ^[0-9]+$ ]] || at=0
   (( now - at >= ttl )) && return 0
+  [[ -e "$CC_BG_D/claims.stamp" ]] || return 1   # never filled; failed < 5 s ago
   local db; db="$(cc_bg_seadb)"
   [[ -e "$db" && "$db" -nt "$CC_BG_D/claims.stamp" ]] && return 0
   [[ -e "$db-wal" && "$db-wal" -nt "$CC_BG_D/claims.stamp" ]] && return 0
   return 1
+}
+
+# cc_bg_late <PostToolUse payload, any tool> — 0.5.1 (H2-19): after a Bash
+# call that started background work, report claimed paths of OTHER
+# sessions that changed since the last look (the job's writes land after
+# PostToolUse of the call that started it). For a Bash call, only up to its
+# own start (cc_bg_check reports the call itself). Sets CC_BG_LATE.
+CC_BG_LATE=""
+cc_bg_late() {
+  local payload="$1" sid="" upper="" tid
+  CC_BG_LATE=""
+  [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+  cc_bg_session "$sid"
+  [[ -e "$CC_BG_B.bgwatch" ]] || return 0
+  if [[ -n "$(find "$CC_BG_B.bgwatch" -mmin +10 -print 2>/dev/null)" ]]; then rm -f "$CC_BG_B.bgwatch" 2>/dev/null; return 0; fi
+  [[ -s "$CC_BG_D/claims.tsv" ]] || return 0
+  if [[ "$payload" =~ \"tool_name\":[[:space:]]*\"Bash\" ]]; then
+    tid="$(cc_bg_tid "$payload")"; [[ -n "$tid" && -e "$CC_BG_B.pre.$tid" ]] && upper="$CC_BG_B.pre.$tid"
+  fi
+  local me ov iso ses path holder ticket title exp; me="$sid"; ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && me="$ov"
+  cc_now_var iso
+  local -a cl=() paths=()
+  while IFS=$'\x1f' read -r ses path holder ticket title exp; do
+    [[ -n "$path" && "$ses" != "$me" ]] || continue
+    [[ -z "$exp" || "$exp" > "$iso" ]] || continue
+    cl+=("${path}"$'\x1f'"${holder}"$'\x1f'"${ticket}"$'\x1f'"${title}"$'\x1f'"${exp}")
+    [[ -e "$path" ]] && paths+=("$path")
+  done < "$CC_BG_D/claims.tsv"
+  (( ${#paths[@]} > 0 )) || return 0
+  local hits
+  if [[ -n "$upper" ]]; then
+    hits="$(cc_with_timeout 5 find "${paths[@]}" \( -name .git -o -name node_modules \) -prune -o -type f \( -newer "$CC_BG_B.bgwatch" -o -cnewer "$CC_BG_B.bgwatch" \) ! -newer "$upper" -print 2>/dev/null)"
+    touch -r "$upper" "$CC_BG_B.bgwatch" 2>/dev/null || true
+  else
+    hits="$(cc_with_timeout 5 find "${paths[@]}" \( -name .git -o -name node_modules \) -prune -o -type f \( -newer "$CC_BG_B.bgwatch" -o -cnewer "$CC_BG_B.bgwatch" \) -print 2>/dev/null)"
+    : > "$CC_BG_B.bgwatch" 2>/dev/null || true
+  fi
+  [[ -n "$hits" ]] || return 0
+  local out="" n=0 h c cpath
+  while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    cpath=""
+    for c in "${cl[@]}"; do
+      IFS=$'\x1f' read -r path holder ticket title exp <<<"$c"
+      if [[ "$h" == "$path" || "$h" == "$path/"* ]]; then cpath="$path"; break; fi
+    done
+    [[ -n "$cpath" ]] || continue
+    n=$((n + 1)); (( n <= 10 )) || continue
+    out="${out}
+- ${h#"$CC_ROOT"/} — held by ${holder}, ticket ${ticket} \"${title}\" (locks ${cpath#"$CC_ROOT"/}; expires ${exp:-?})"
+  done <<<"$hits"
+  (( n > 0 )) || return 0
+  (( n > 10 )) && out="${out}
+- … and $((n - 10)) more"
+  CC_BG_LATE="cc-anchor bash guard: since an earlier Bash call of yours started background work, ${n} path(s) inside live sea-lite claims held by OTHER sessions changed after that call returned (by your background job, or by the holder):${out}
+If your background job wrote there, stop it and undo the change unless you agreed it with the holder."
+  cc_log "bash_guard: ${n} late change(s) inside other sessions' claims after background work"
 }
 
 # PostToolUse(Bash): sets CC_BG_CONTEXT (empty: say nothing).
@@ -1245,26 +1513,89 @@ cc_bg_check() {
   [[ "$payload" =~ \"tool_name\":[[:space:]]*\"Bash\" ]] || return 0
   [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
   cc_bg_session "$sid"
+  if [[ -e "$CC_BG_B.nobin" ]]; then
+    rm -f "$CC_BG_B.nobin" 2>/dev/null
+    cc_sea_advise "$sid" "the sea-lite CLI was not found" && CC_BG_CONTEXT="$CC_SEA_ADVICE"
+  fi
   [[ -e "$CC_BG_B.off" ]] && return 0
   cc_bg_enabled || return 0
   tid="$(cc_bg_tid "$payload")"
   [[ -n "$tid" ]] || return 0
   pre="$CC_BG_B.pre.$tid"
   [[ -e "$pre" ]] || return 0
+  # 0.5.1 (H2-19): this call started background work (`… &`, nohup,
+  # setsid, disown): watch the claims for writes that land AFTER it returned
+  # (cc_bg_late, on the following tool calls, for up to 10 minutes). The
+  # watch starts at this call's own start: a slow PostToolUse must not
+  # hide a write that lands while it runs.
+  if [[ -e "$CC_BG_B.bgjob.$tid" ]] || cc_bg_starts_job "$payload"; then
+    touch -r "$pre" "$CC_BG_B.bgwatch" 2>/dev/null || : > "$CC_BG_B.bgwatch" 2>/dev/null || true
+  fi
+  rm -f "$CC_BG_B.bgjob.$tid" 2>/dev/null
   if cc_bg_stale; then cc_bg_refresh || true; fi
-  [[ -s "$CC_BG_D/claims.tsv" ]] || return 0
+  local advice=""
+  if [[ -s "$CC_BG_D/claims.degraded" ]]; then
+    local drc="" good="" nowd what="has no claims to check against"; IFS= read -r drc < "$CC_BG_D/claims.degraded"
+    [[ -s "$CC_BG_D/claims.good" ]] && IFS= read -r good < "$CC_BG_D/claims.good"
+    cc_epoch_now_var nowd; [[ "$good" =~ ^[0-9]+$ ]] && what="is using the claims it saw $((nowd - good)) s ago"
+    cc_sea_advise "$sid" "sea-lite board $([[ "$drc" == 124 ]] && echo "timed out" || echo "failed (exit $drc)"); the Bash guard ${what}" && advice="$CC_SEA_ADVICE"
+  elif [[ -e "$CC_BG_D/claims.good" ]]; then
+    cc_sea_recovered "$sid"
+  fi
+  [[ -s "$CC_BG_D/claims.tsv" ]] || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; rm -f "$pre" 2>/dev/null; return 0; }
   local me ov; me="$sid"; ov="$(cc_cfg_raw sea_session)"; [[ -n "$ov" ]] && me="$ov"
+  # 0.5.1 (H2-24b): a claim of THIS session is someone else's work too when
+  # a different agent of the session took it — a subagent editing the main
+  # agent's claim or a sibling's. Known from claims.json (claims taken
+  # through the sea_* MCP tools, tagged with the agent_id); a claim of this
+  # session that claims.json does not know is treated as the main agent's.
+  local myagent; myagent="$(cc_payload_agent "$payload")"
+  local owners=""
+  if [[ -s "$CC_CLAIMS" ]] && grep -Fq -- "$me" "$CC_BG_D/claims.tsv" 2>/dev/null; then
+    owners="$(jq -r --arg s "$sid" '(.claims // {}) | to_entries[] | select((.value.session // "") == $s) | "\(.key[0:8])\u001f\(.value.agent // "")"' "$CC_CLAIMS" 2>/dev/null)"
+  fi
   local iso; cc_now_var iso
-  local ses path holder ticket title exp
-  local -a cl=() paths=() gone=()
+  local ses path holder ticket title exp prevp="" owner
+  if [[ -s "$CC_BG_B.present.$tid" ]]; then prevp="$(cat "$CC_BG_B.present.$tid" 2>/dev/null)"
+  elif [[ -s "$CC_BG_B.present" ]]; then prevp="$(cat "$CC_BG_B.present" 2>/dev/null)"; fi
+  rm -f "$CC_BG_B.present.$tid" 2>/dev/null
+  local -a cl=() paths=() gone=() present=()
   while IFS=$'\x1f' read -r ses path holder ticket title exp; do
-    [[ -n "$path" && "$ses" != "$me" ]] || continue
+    [[ -n "$path" ]] || continue
+    if [[ "$ses" == "$me" ]]; then
+      owner=""
+      if [[ -n "$owners" ]]; then
+        local ot oa
+        while IFS=$'\x1f' read -r ot oa; do [[ "$ot" == "$ticket" ]] && { owner="$oa"; break; }; done <<<"$owners"
+      fi
+      [[ "$owner" == "$myagent" ]] && continue
+      holder="${holder} — your own session's $([[ -n "$owner" ]] && printf 'subagent %s' "$owner" || printf 'main agent')"
+    fi
     [[ -z "$exp" || "$exp" > "$iso" ]] || continue
     cl+=("${path}"$'\x1f'"${holder}"$'\x1f'"${ticket}"$'\x1f'"${title}"$'\x1f'"${exp}")
-    if [[ -e "$path" || -L "$path" ]]; then paths+=("$path")
-    elif [[ -d "${path%/*}" ]] && ! [[ "${path%/*}" -ot "$pre" ]]; then gone+=("$path (removed)"); fi
+    if [[ -e "$path" || -L "$path" ]]; then paths+=("$path"); present+=("$path")
+    elif [[ -d "${path%/*}" ]] && ! [[ "${path%/*}" -ot "$pre" ]]; then gone+=("$path (removed)")
+    else
+      # 0.5.1 (H2-18): gone through an ancestor (rm -rf src, mv src x, a
+      # checkout without src/): the nearest directory that still exists
+      # changed during this call, and the path existed before it (seen at
+      # PreToolUse or at the last check; else git knew it: in the index, or
+      # in the commit HEAD was on before a checkout).
+      local anc="${path%/*}" was=0 relp="${path#"$CC_ROOT"/}"
+      while [[ -n "$anc" && ! -d "$anc" ]]; do anc="${anc%/*}"; done
+      if [[ -n "$anc" ]] && ! [[ "$anc" -ot "$pre" ]]; then
+        if [[ -n "$prevp" ]]; then grep -Fxq -- "$path" <<<"$prevp" && was=1
+        elif [[ "$relp" != "$path" ]] && command -v git >/dev/null 2>&1; then
+          if [[ -n "$(cd "$CC_ROOT" 2>/dev/null && cc_with_timeout 3 git ls-files -- "$relp" 2>/dev/null | head -1)" ]]; then was=1
+          elif (cd "$CC_ROOT" 2>/dev/null && cc_with_timeout 3 git cat-file -e "HEAD@{1}:$relp" 2>/dev/null); then was=1; fi
+        fi
+      fi
+      (( was )) && gone+=("$path (removed)")
+    fi
   done < "$CC_BG_D/claims.tsv"
-  (( ${#cl[@]} > 0 )) || { rm -f "$pre" 2>/dev/null; return 0; }
+  if (( ${#present[@]} > 0 )); then printf '%s\n' "${present[@]}" > "$CC_BG_B.present" 2>/dev/null || true
+  else rm -f "$CC_BG_B.present" 2>/dev/null; fi
+  (( ${#cl[@]} > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; rm -f "$pre" 2>/dev/null; return 0; }
   # One find over the claimed paths: modified OR status-changed after the stamp.
   local hits="" rc=0 note=""
   if (( ${#paths[@]} > 0 )); then
@@ -1296,7 +1627,7 @@ cc_bg_check() {
     done
   fi
   found+=(${gone[@]+"${gone[@]}"})
-  (( ${#found[@]} > 0 )) || return 0
+  (( ${#found[@]} > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; return 0; }
   # Drop git-ignored files (build output) with one bounded `git status`.
   local ignored=""
   if command -v git >/dev/null 2>&1; then
@@ -1308,11 +1639,6 @@ cc_bg_check() {
   for h in "${found[@]}"; do
     bare="${h% (entries added, removed or renamed)}"; bare="${bare% (removed)}"; bare="${bare%/}"
     rel="${h#"$CC_ROOT"/}"
-    if [[ -n "$ignored" ]]; then
-      local skip=0 ig
-      while IFS= read -r ig; do [[ -n "$ig" && ( "${bare#"$CC_ROOT"/}" == "${ig%/}" || "${bare#"$CC_ROOT"/}" == "${ig%/}"/* ) ]] && { skip=1; break; }; done <<<"$ignored"
-      (( skip )) && continue
-    fi
     # Which claim covers it (first match).
     holder="?"; ticket="?"; title=""; exp=""; cpath=""
     for c in "${cl[@]}"; do
@@ -1320,6 +1646,18 @@ cc_bg_check() {
       if [[ "$bare" == "$path" || "$bare" == "$path/"* ]]; then cpath="$path"; break; fi
     done
     [[ -n "$cpath" ]] || continue
+    # Git-ignored output (build artefacts) inside a claim is dropped — unless
+    # the claim itself is on an ignored path (0.5.1, H2-24a: config/, .env …).
+    if [[ -n "$ignored" ]]; then
+      local skip=0 ig crel="${cpath#"$CC_ROOT"/}"
+      while IFS= read -r ig; do
+        [[ -n "$ig" ]] || continue
+        ig="${ig%/}"
+        [[ "$crel" == "$ig" || "$crel" == "$ig"/* ]] && continue   # ignore covers the whole claim
+        [[ "${bare#"$CC_ROOT"/}" == "$ig" || "${bare#"$CC_ROOT"/}" == "$ig"/* ]] && { skip=1; break; }
+      done <<<"$ignored"
+      (( skip )) && continue
+    fi
     n=$((n + 1))
     (( shown < 10 )) || continue
     shown=$((shown + 1))
@@ -1327,9 +1665,10 @@ cc_bg_check() {
     out="${out}
 - ${rel} — held by ${holder}, ticket ${ticket} \"${title}\" (locks ${l2}; expires ${exp:-?})"
   done
-  (( n > 0 )) || return 0
+  (( n > 0 )) || { CC_BG_CONTEXT="${CC_BG_CONTEXT:-$advice}"; return 0; }
   (( n > shown )) && out="${out}
 - … and $((n - shown)) more"
+  [[ -n "$advice" ]] && note="${note} (sea-lite board is not answering: checked against the claims last seen)"
   CC_BG_CONTEXT="cc-anchor bash guard: that Bash call changed ${n} path(s) inside live sea-lite claims held by OTHER sessions${note}:${out}
 Those paths are another agent's work in progress. Undo your change (git checkout -- <path>, or delete the new file) unless you agreed it with the holder; the Edit/Write scope guard does not see Bash edits."
   cc_log "bash_guard: ${n} path(s) inside other sessions' claims after Bash"

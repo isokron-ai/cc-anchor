@@ -4,6 +4,153 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [0.5.1] — 2026-11-01
+
+Fixes the pending gate after hardening round 2 (agent-memory-bench
+`hardening-hooks` @ 3b10850 and 386db8c, `stress/findings/hooks.md`) and the
+live-agent round (`hardening-live` @ 738edc5, L2-02 … L2-04).
+The gate no longer tries to find dangerous commands in shell text.
+
+### Changed
+- **Gate semantics (H2-02, H2-04, H2-05, H2-07, H2-09).** Nothing pending
+  (and the store reads ok): every Bash call runs — no `pulse_match` regex,
+  no chain-split or one-liner denials (19/25 false alarms in round 2, and
+  `pulse_chain: split` re-denied every retry with nothing pending).
+  Something pending (`pending_count > 0` for any of the agent's actors on
+  kronicle-lite ≥ 0.8.0, an unseen blocking retraction on ≤ 0.7.0, or an
+  integrity failure): every Bash call is denied unless the new
+  `scripts/readonly.jq` proves it read-only (cat, less, head, tail, ls,
+  grep, rg, find without -exec/-delete, wc, diff, jq, git status/log/diff/
+  show/branch --list/rev-parse/ls-files…, kronicle-lite get/pending/orient,
+  sea-lite board/list/show…, echo/printf, pwd, which, cd). Anything it does
+  not fully understand — assignments, subshells, `$( )`, `<( )`, `$'…'`,
+  here-docs and here-strings, `source`, interpreters, redirections other
+  than to /dev/null, `&`, unbalanced quotes, calls over `pulse_max_bytes`
+  (8192) — is not read-only. The deny names each change (document ›
+  heading, the version read → the current one, the diff), what still runs
+  and why this call does not, and that re-reading clears it.
+  `scripts/pulse.jq` is gone; `pulse_match` and `pulse_chain` are ignored.
+- **Fail closed while pending (H2-02, H2-09).** A classifier error counts as
+  not read-only, and a kronicle-lite read that fails or times out falls
+  back to the last answer: a change known to be pending still denies;
+  nothing known pending still fails open. The classifier is one regex scan
+  (a 200 KB command took 14 s in jq before, past the 10 s hook timeout; now
+  over-size is refused up front). PreToolUse Bash hook timeout 10 → 15 s.
+- Pending items now say which version the agent read (`you read it at seq
+  N`).
+
+### Fixed
+- **H2-01 (S1)**: `--actor=X` in the kronicle-lite server's args was not
+  parsed, so the gate checked `local-agent` (0 pending), allowed `git push`
+  and told the agent the change it relied on did not block. `--actor X`,
+  `--actor=X` and `KRONICLE_LITE_ACTOR` are all read; the "nothing blocks"
+  context now only appears when nothing is pending for any of the agent's
+  actors and names them.
+- **H2-03**: `--data-dir=DIR` is parsed; the kronicle-lite server is found by
+  its command line (`npx kronicle-lite`, `node …/kronicle-lite/dist/cli.js`,
+  `kronicle-lite serve`, command strings with spaces) whatever its key, so
+  `"memory": {command: "kronicle-lite", …}` gets the right actor and store;
+  the gate is on the **union** of the configured actor and every `actor_id`
+  the agent passed to any MCP tool (any server key or plugin prefix) — an
+  `actor_id` on a non-read tool no longer switches the gated actor, and
+  naming another actor never clears a pending change. Per agent: a
+  subagent with its own actor is gated on it and on the server actor; the
+  parent is not gated on a subagent's private actor.
+- **H2-10 (S1)**: a subagent's learned actors survived nothing: `SubagentStop`
+  deleted them with its cursor, so a resumed subagent (same `agent_id`) was
+  gated on the server actor and its `git push` allowed with the "none of it
+  blocks" text. `SubagentStop` now drops the cursor files but keeps
+  `<sid8>.a-<agent>.actors`.
+- **H2-11**: during the 60 s back-off after one slow read the pulse used the
+  cached pending count (0, from before the change) and allowed silently.
+  The pulse no longer honours the back-off (the push still does): when the
+  store may have changed it reads, bounded by `push_timeout`; when that read
+  fails and the agent has had an answer before, the cached answer is stale,
+  not "clear" — every call that is not read-only is denied (`pulse_mode:
+  warn`: warned) with "kronicle-lite could not be read just now". A CLI
+  that never answered in this session still fails open.
+- **H2-12 (cc-anchor side)**: `kronicle-lite shim ack`, `shim install` /
+  `uninstall` and `pending ack` (any spelling: npx, node …/cli.js, quoted,
+  behind an assignment) clear or reconfigure kronicle-lite's own gate
+  without a re-read. The pulse denies them in any mode, pending or not,
+  even without kronicle-lite configured, and tells the agent to re-read the
+  pending items or ask the operator.
+- **L2-02**: a tamper that rewrites a stored block or event without moving
+  the head (projection-only) never reached the agent: cc-anchor read only
+  `orient --focus pulse` (no integrity verdict) unless the head moved. When
+  the store changed but the head did not, it now runs the read-only
+  `kronicle-lite verify-chain` (bounded by `push_timeout`; inconclusive on
+  timeout), so a mismatch is seen at once: the push warns (top priority)
+  and the pulse lets only read-only calls run.
+- **L2-03 (cc-anchor side)**: a damaged store (kronicle-lite exit 77, SQLite
+  CORRUPT / NOTADB, "database disk image is malformed") is an integrity
+  failure, not an outage: warned and gated at once instead of failing open
+  and advising "offline" after 20 calls. A genuinely unavailable
+  kronicle-lite is told to the agent on the first unchecked non-read-only
+  Bash call (and denies once there is a stale answer, H2-11).
+- **L2-04**: with no actor named in any MCP config cc-anchor can read
+  (`--mcp-config`, a plugin server …) the pending gate asked `local-agent`,
+  got 0 and also switched off the retraction rule. The actor is now known
+  to be a guess: the 0.4.0 retraction rule stays on next to the pending
+  gate, and the agent is told once (with the first change, and in every
+  deny) to set `CC_ANCHOR_KRONICLE_ACTOR`. `$CLAUDE_CONFIG_DIR/.claude.json`,
+  `$CLAUDE_CONFIG_DIR/settings.json` and its plugin cache are read too.
+- **H2-08**: `~/.claude.json` `projects[…]` is looked up by the literal
+  project path and by its physical (symlink-resolved) path (also for
+  sea-lite detection).
+
+### Fixed — sea-lite claim guards
+- **H2-21 / H2-23 (cc-anchor side)**: the Edit/Write scope guard's verdict
+  cache is dropped when the sea-lite store changes (a new claim by anyone),
+  and a timeout, crash, missing CLI, answer without the JSON contract or an
+  `exit 2` other than `outside_repo` is never cached as "ok" (it fails open
+  for that edit only).
+- **H2-22**: when sea-lite is unavailable the claim guards still fail open,
+  but now tell the agent once per outage (shared latch for the scope guard
+  and the Bash guard), like the kronicle-lite "feed offline" advisory.
+- **H2-20**: one slow `sea-lite board` call no longer empties the Bash
+  guard's claim cache for `bash_guard_ttl`: the last good claims stay in
+  use, the next refresh is tried after 5 s (at once when there are none),
+  and the agent is told the guard is degraded.
+- **H2-18**: a claimed path removed through its parent (`rm -rf src`,
+  `mv src src-old`, `git checkout` of a branch without `src/`) is reported
+  when it existed before the call (seen at PreToolUse, at the last check,
+  or known to git).
+- **H2-19**: writes that land after a Bash call that started background
+  work (`&`, `nohup`, `setsid`, `disown`) are reported at the following
+  tool calls (up to 10 minutes).
+- **H2-24**: a claim on a git-ignored path is reported (only ignored output
+  *inside* a claim is dropped); a subagent editing a claim its own session's
+  main agent or a sibling took (known from the `sea_*` results; a CLI claim
+  of the session counts as the main agent's) is warned.
+- A Bash payload without `tool_use_id` is checked against a per-session
+  stamp instead of skipped.
+
+### Documentation
+- README: the gate, the read-only allowlist, fail-closed rules, and what is
+  out of scope (H2-06: git indirection, quoted code arguments, functions /
+  aliases / exported env from before the change, Windows spellings — all
+  denied while something is pending since none is read-only, but only an
+  exec-time shim sees them otherwise; `git commit --no-verify`-style
+  bypasses of other guards).
+
+### Tests
+- `tests/stress/gate.sh` (the round-2 harness, 29 checks verbatim + 36 for
+  0.5.1: nothing pending → nothing denied, read-only calls run while
+  pending, the deny text, re-read via the CLI, actor union, fail closed /
+  open, 100 KB command, warn mode; from 386db8c: `backoff`, `offline`,
+  `substop_pending`, plus `backoff_broken` and `ack`; from hardening-live:
+  `tamper_block|event|garbage`, `actor_unnamed`, `claude_config_dir`,
+  `unavailable_first`) runs from
+  `tests/stress.test.mjs` against the real kronicle-lite 0.8.0.
+- `tests/stress/bash-guard.sh` (round 1), `bash-guard2.sh` and
+  `scope-guard.sh` (round 2) against the real sea-lite CLI (Linux), plus
+  unit tests for the scope guard cache and advisory.
+- `tests/stress/pulse-corpus.sh` (85 cases) and `pulse-corpus2.sh` (125)
+  under 0.5.1 rules: no world-changing case reads as read-only, harmless
+  reads stay read-only; run from `tests/push.test.mjs` with new
+  `readonly.jq` unit tests.
+
 ## [0.5.0] — 2026-11-01
 
 Version-bound reconciliation with kronicle-lite 0.8.0 (`pending`), per-agent

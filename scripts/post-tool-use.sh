@@ -60,8 +60,12 @@ cc_render "$input"
 cc_claims_update "$input"
 cc_sea_heartbeat "$input"
 cc_kl_push "$input"
+cc_bg_late "$input"
 cc_bg_check "$input"
-ctx="$CC_BG_CONTEXT"
+ctx="$CC_BG_LATE"
+[[ -n "$CC_BG_CONTEXT" ]] && ctx="${ctx:+$ctx
+
+}$CC_BG_CONTEXT"
 [[ -n "$CC_KL_CONTEXT" ]] && ctx="${ctx:+$ctx
 
 }$CC_KL_CONTEXT"

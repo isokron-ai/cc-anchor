@@ -433,7 +433,7 @@ test('hooks.json references only scripts that exist, in exec form, with timeouts
       assert.ok(Array.isArray(h.args) && h.args.length === 1, ev);
       const rel = h.args[0].replace('${CLAUDE_PLUGIN_ROOT}/', '');
       assert.ok(fs.existsSync(path.join(ROOT, rel)), `${ev}: ${rel} exists`);
-      assert.ok(h.timeout > 0 && h.timeout <= 10, ev);
+      assert.ok(h.timeout > 0 && h.timeout <= 15, ev);
     }
   }
   assert.equal(hooks.PreCompact[0].matcher, 'manual|auto');
@@ -729,12 +729,14 @@ test('PreToolUse scope guard (docs Edit payload): off by default (no output, no 
   } finally { sb.cleanup(); }
 });
 
-test('PreToolUse scope guard fails open: no binary, unsupported subcommand (exit 2), timeout — exit 0, no output, logged once', () => {
+test('PreToolUse scope guard fails open: no binary, unsupported subcommand (exit 2), timeout — exit 0, never a deny, logged once, the agent told once (H2-22)', () => {
   const sb = sandbox();
   try {
     const p = fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/x.ts` } });
     let r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', PATH: '/usr/bin:/bin', HOME: sb.home });
-    assert.equal(r.status, 0); assert.equal(r.stdout, '');
+    assert.equal(r.status, 0);
+    assert.equal(r.json?.hookSpecificOutput?.permissionDecision, undefined, 'never a deny');
+    assert.match(r.json?.hookSpecificOutput?.additionalContext ?? '', /sea-lite is not answering right now \(the sea-lite CLI was not found\)\. The claim guards are NOT checking/);
     assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /sea-lite CLI not found; failing open/);
     const old = fakeCli(sb, 'sea-lite', 'echo "unknown command: $1" >&2; exit 2');
     fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
@@ -756,10 +758,43 @@ test('PreToolUse scope guard fails open: no binary, unsupported subcommand (exit
       const t0 = Date.now();
       r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: slow, CC_ANCHOR_SCOPE_TIMEOUT: '1', CC_ANCHOR_TEST_NO_TIMEOUT_BIN: fallback });
       const ms = Date.now() - t0;
-      assert.equal(r.status, 0); assert.equal(r.stdout, '');
+      assert.equal(r.status, 0); assert.equal(r.stdout, '', 'advised once per outage already');
       assert.ok(ms < 5000, `bounded by scope_timeout (fallback=${fallback}): ${ms} ms`);
     }
     assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /exited 124 \(crash or timeout\)/);
+  } finally { sb.cleanup(); }
+});
+
+test('PreToolUse scope guard never caches a failure, and a sea-lite store change drops cached verdicts (H2-21, H2-23)', () => {
+  const sb = sandbox();
+  try {
+    const calls = path.join(sb.base, 'calls');
+    const mode = path.join(sb.base, 'mode');
+    const data = path.join(sb.base, 'sea');
+    fs.mkdirSync(data);
+    const conflict = JSON.stringify({ schema: 'sea-lite.scope-check/1', ok: false, conflicts: [{ ticket_id: 'tkt_X', title: 'X', holder: 'b', holder_label: 'b', held: ['src/**'], claim_expires_at: '2099' }] });
+    // mode file: ok | conflict | slow | exit2
+    const bin = fakeCli(sb, 'sea-lite', `echo x >> "${calls}"; m=$(cat "${mode}"); case $m in conflict) echo '${conflict}'; exit 1;; slow) sleep 10;; exit2) echo '{"schema":"sea-lite.scope-check/1","error":"invalid_input","details":{"reason":"climbs"}}'; exit 2;; esac; exit 0`);
+    const on = { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: bin, CC_ANCHOR_SEA_DATA_DIR: data, CC_ANCHOR_SCOPE_TIMEOUT: '1' };
+    const p = fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/login.ts` } });
+    const n = () => fs.readFileSync(calls, 'utf8').trim().split('\n').length;
+    const db = path.join(data, 'kronicle-lite.db');
+    fs.writeFileSync(db, ''); const old = new Date(Date.now() - 60000); fs.utimesSync(db, old, old);
+    fs.writeFileSync(mode, 'ok');
+    assert.equal(hook('pre-tool-use.sh', p, sb.env, on).stdout, '');
+    hook('pre-tool-use.sh', p, sb.env, on);
+    assert.equal(n(), 1, 'ok is cached while the store is unchanged');
+    fs.writeFileSync(mode, 'conflict');
+    const later = new Date(Date.now() + 5000); fs.utimesSync(db, later, later); // someone claimed: the store changed
+    assert.equal(hook('pre-tool-use.sh', p, sb.env, on).json?.hookSpecificOutput?.permissionDecision, 'deny', 'H2-21a: a claim made after the cached ok is seen');
+    fs.utimesSync(db, old, old); fs.rmSync(path.join(sb.run, 'scope-cache.json'));
+    for (const m of ['slow', 'exit2']) {
+      fs.writeFileSync(mode, m);
+      assert.notEqual(hook('pre-tool-use.sh', p, sb.env, on).json?.hookSpecificOutput?.permissionDecision, 'deny', `${m}: fail open`);
+      fs.writeFileSync(mode, 'conflict');
+      assert.equal(hook('pre-tool-use.sh', p, sb.env, on).json?.hookSpecificOutput?.permissionDecision, 'deny', `H2-21b/H2-23: ${m} was not cached as ok`);
+      fs.rmSync(path.join(sb.run, 'scope-cache.json'));
+    }
   } finally { sb.cleanup(); }
 });
 
