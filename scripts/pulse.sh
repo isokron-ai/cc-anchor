@@ -60,14 +60,38 @@ sid=""
 cc_kl_session "$sid" "$(cc_payload_agent "$input")"
 [[ -e "$CC_KL_S.off" ]] && exit 0
 case "$(cc_cfg_raw pulse)" in 0|false|no|off) exit 0;; esac
+
+# One jq: scripts/readonly.jq (a regex lexer + allowlist, capped at
+# pulse_max_bytes) says whether the call is read-only, and whether it runs
+# an operator-only kronicle-lite override (`shim ack`, `pending ack`, `shim
+# uninstall` …). It runs here, before the kronicle-lite checks, only when the
+# call mentions an override at all (bash regex); otherwise after them.
+max="$(cc_cfg_raw pulse_max_bytes)"; [[ "$max" =~ ^[0-9]+$ ]] || max=8192
+ro=""; why=""; head=""; ack=""; analysed=0
+analyse() {
+  analysed=1
+  local line
+  line="$(jq -r --arg max "$max" --arg fmt line -f "$CC_LIB_DIR/readonly.jq" <<<"$input" 2>/dev/null)" || line=""
+  IFS=$'\x1f' read -r ro why head ack <<<"$line"
+}
+
+# H2-12: acknowledging a change (or switching the shims off) clears
+# kronicle-lite's own exec-time gate WITHOUT a re-read. That is the
+# operator's decision; an agent that runs it is denied, in any pulse_mode,
+# whether or not kronicle-lite is configured for this project.
+if [[ "$input" =~ (shim|pending)[^A-Za-z0-9]{1,12}(ack|uninstall|install|off) ]]; then
+  analyse
+  if [[ "$ack" == true ]]; then
+    cc_log "pulse: denied \`${head:0:60}\` (kronicle-lite override is operator-only)"
+    cc_emit_deny "cc-anchor pulse: did NOT run \`${head}\` — acknowledging a kronicle-lite change, or installing / uninstalling / reconfiguring the shims, overrides the gate WITHOUT re-reading what changed. That is the operator's decision, not the agent's. Re-read the pending items instead (\`kronicle-lite pending --actor <your actor>\` lists them; recall, kronicle://docs/<slug> or \`kronicle-lite get <slug> --actor <your actor>\` clears each one), or ask the operator to run this command themselves."
+    exit 0
+  fi
+fi
+
 cc_kl_enabled || exit 0
 
-# Read-only calls always run: decided before any kronicle-lite work. One jq
-# (scripts/readonly.jq: a regex lexer + allowlist, capped at pulse_max_bytes).
-max="$(cc_cfg_raw pulse_max_bytes)"; [[ "$max" =~ ^[0-9]+$ ]] || max=8192
-line="$(jq -r --arg max "$max" --arg fmt line -f "$CC_LIB_DIR/readonly.jq" <<<"$input" 2>/dev/null)" || line=""
-ro=""; why=""; head=""
-IFS=$'\x1f' read -r ro why head <<<"$line"
+# Read-only calls always run: decided before any kronicle-lite work.
+(( analysed )) || analyse
 [[ "$ro" == true ]] && exit 0
 if [[ "$ro" != false ]]; then
   why="the gate could not analyse it"; head="(this Bash call)"
@@ -92,11 +116,22 @@ $3"
   exit 0
 }
 
+# H2-11: the store may have changed and kronicle-lite could not be read now.
+gate_unknown() {
+  gate "kronicle-lite unreadable, store changed since the last answer" "kronicle-lite could not be read just now (failed or timed out; see .claude/cc-anchor/log), and the store has changed since its last answer, so cc-anchor cannot tell whether something you relied on changed." "Until it can be read again, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}. Retry in a moment. If kronicle-lite stays unreadable, tell the operator (they can repair it, or set pulse_mode: warn)."
+}
+
 legacy=""
 [[ -s "$CC_KL_B.pending" ]] && legacy="$(cat "$CC_KL_B.pending" 2>/dev/null)"
 had_integ=0; [[ -s "$CC_KL_S.integrity" ]] && had_integ=1
-CC_KL_FAILED=0
+CC_KL_FAILED=0; CC_KL_XFAIL=0
 cc_kl_fetch strict || true
+# H2-11: a read was needed (the store may have changed since the last answer)
+# and failed, and this agent HAS had answers before: the cached answer is
+# stale, not "nothing pending". (No answer ever — a CLI broken since the
+# session started — stays fail-open, as before.)
+unknown=0
+if (( CC_KL_FAILED == 1 )) && [[ -s "$CC_KL_B.cursor" ]]; then unknown=1; fi
 
 # A store that reports integrity.ok=false: only read-only calls run until a
 # fresh read says it is ok again (an older failure is re-checked now; at
@@ -113,11 +148,12 @@ fi
 # version. Cleared only by re-reading. Older kronicle-lite: the
 # retraction-since-last-look logic below.
 if [[ -e "$CC_KL_S.klcap" ]] || [[ ! -e "$CC_KL_S.klnocap" && "$CC_KL_FAILED" != 1 ]]; then
-  [[ -s "$CC_KL_B.klpend" ]] || cc_kl_pending_refresh || true
+  if [[ ! -s "$CC_KL_B.klpend" ]] && ! cc_kl_pending_refresh && [[ -s "$CC_KL_B.cursor" ]]; then unknown=1; fi
 fi
 if [[ -e "$CC_KL_S.klcap" ]]; then
   rm -f "$CC_KL_B.pending" 2>/dev/null; legacy=""; KL_BLOCK=0
   cc_kl_extra_pending
+  (( CC_KL_XFAIL > 0 )) && unknown=1
   total=0; items=""; acts=""; known=""
   for f in "$CC_KL_B.klpend" "$CC_KL_B".xp-*; do
     [[ -s "$f" ]] || continue
@@ -140,6 +176,7 @@ if [[ -e "$CC_KL_S.klcap" ]]; then
 ${items}" "Until you re-read them, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}.
 Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change, retrying, or reading as another actor does not. Then check the values this command uses and run it again."
   fi
+  (( unknown )) && gate_unknown
   if (( KL_SHOWN > 0 )); then
     cc_emit_context PreToolUse "cc-anchor pulse: kronicle-lite changed since your last check (head seq ${KL_SEQ}). None of it is pending re-read for you (actor(s) ${known:-$CC_KL_ACTOR}), so \`${head}\` runs; for reference:
 ${KL_BODY}"
@@ -157,6 +194,7 @@ if [[ -n "$block_lines" ]]; then
 ${block_lines}" "This call is not read-only (${why}), so it was held back. Re-read the affected document(s) (recall, or get_system_state with your cursor), check the values this command uses, then run it again."
 fi
 
+(( unknown )) && gate_unknown
 if (( KL_SHOWN > 0 )); then
   cc_emit_context PreToolUse "cc-anchor pulse: kronicle-lite changed since your last check (head seq ${KL_SEQ}); none of it is a blocking retraction, so \`${head}\` runs:
 ${KL_BODY}"

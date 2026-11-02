@@ -620,7 +620,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 # (config `push_timeout` s, default 3, per CLI call) never blocks a tool call
 # and never prints anything but valid hook JSON; one log line says why.
 
-CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_FAILED=0
+CC_KL_B=""; CC_KL_S=""; CC_KL_SID=""; CC_KL_AGENT=""; CC_KL_DD=""; CC_KL_BIN=""; CC_KL_ACTOR=""; CC_KL_FAILED=0; CC_KL_XFAIL=0
 KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
 
 cc_epoch_now_var() {  # NAME — epoch seconds without a fork on bash >= 4.2
@@ -676,11 +676,14 @@ cc_kl_seed() {
   cc_kl_init
 }
 
-# cc_kl_forget — drop a stopped subagent's cursor files.
+# cc_kl_forget — drop a stopped subagent's cursor files (not its actors).
 cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
   rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" \
-        "$CC_KL_B.actor" "$CC_KL_B.actors" "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" "$CC_KL_B".xp-* 2>/dev/null || true
+        "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" "$CC_KL_B".xp-* 2>/dev/null || true
+  # The actors it read as (<B>.actors, and 0.5.0's <B>.actor) stay: a resumed
+  # subagent comes back with the same agent_id, and what it read before the
+  # stop is still pending for it (0.5.1, H2-10).
 }
 
 # Data dir of the kronicle-lite store the agent's MCP server uses.
@@ -781,6 +784,7 @@ cc_kl_extra_pending() {
     rm -f "$f.raw.$$" 2>/dev/null
     if [[ -n "$r" && "$r" != nocap ]]; then printf '%s\n' "$r" > "$f" 2>/dev/null; else n=$((n + 1)); fi
   done
+  CC_KL_XFAIL=$n
   (( n > 0 )) && cc_log_once kl_xperr "pulse: kronicle-lite pending could not be read for ${n} extra actor(s); last known answers stand"
   return 0
 }
@@ -952,8 +956,8 @@ cc_kl_backoff() {  # 0 while inside the 60 s failure back-off
 }
 
 # cc_kl_init — start this session's cursor at the current head (silent).
-cc_kl_init() {
-  cc_kl_backoff && return 1
+cc_kl_init() {  # [strict] — the pulse reads even inside the back-off
+  [[ "${1:-}" == strict ]] || { cc_kl_backoff && return 1; }
   local pre="$CC_KL_B.stamp.$$" out rc cur seq
   cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?
@@ -1044,14 +1048,17 @@ cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
     # Main agent without a cursor: start at the head (nothing is "new" yet).
     # Subagent without one (no SubagentStart seen): seed from the parent and
     # go on to fetch, so what the parent has not consumed reaches it too.
-    if [[ -z "$CC_KL_AGENT" || ! -s "$CC_KL_S.cursor" ]]; then cc_kl_init || CC_KL_FAILED=1; return 1; fi
+    if [[ -z "$CC_KL_AGENT" || ! -s "$CC_KL_S.cursor" ]]; then cc_kl_init "${1:-}" || CC_KL_FAILED=1; return 1; fi
     cc_kl_seed || { CC_KL_FAILED=1; return 1; }
   fi
   # Parked at a corrupt head and the store has since been found ok (by any
   # agent of the session): re-read from the unmoved cursor.
   if [[ -e "$CC_KL_B.parked" && ! -e "$CC_KL_S.integrity" ]]; then rm -f "$CC_KL_B.parked" "$CC_KL_B.seq" "$CC_KL_B.stamp" 2>/dev/null; fi
   cc_kl_unchanged "${1:-}" && return 1
-  cc_kl_backoff && return 1
+  # The push honours the 60 s back-off after a failure; the pulse (strict)
+  # never does: a cached answer from before the store changed is not an
+  # answer (0.5.1, H2-11).
+  [[ "${1:-}" == strict ]] || { cc_kl_backoff && return 1; }
   local pre="$CC_KL_B.stamp.$$" out rc seq stored="" cur=""
   cc_kl_prestamp "$pre" || return 1
   out="$(cc_kl_orient --focus pulse)"; rc=$?

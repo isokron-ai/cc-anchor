@@ -281,11 +281,20 @@ the way bash reads them. Re-reading through Bash works too:
 `kronicle-lite get <slug> --actor <actor>` is itself read-only.
 
 **Fail closed while pending, open otherwise.** If kronicle-lite cannot be
-read (CLI missing, crashing, past `push_timeout`) the gate decides on the
-last answer it got: a change known to be pending still denies; nothing known
-pending allows (one log line, as before). A classifier error counts as "not
-read-only". `pulse_mode: warn` allows the call and adds the same text as
-context.
+read (CLI crashing, past `push_timeout`) the gate decides on the last answer
+it got: a change known to be pending still denies. When the store has
+changed since that answer, the answer is stale: the gate re-reads even
+inside the push's 60 s back-off, and if that fails too, every call that is
+not read-only is denied ("kronicle-lite could not be read just now"). Only a
+CLI that has never answered in this session fails open (one log line, as
+before). A classifier error counts as "not read-only". `pulse_mode: warn`
+allows the call and adds the same text as context.
+
+**Operator-only overrides.** `kronicle-lite shim ack`, `shim install` /
+`uninstall` and `pending ack` clear or reconfigure kronicle-lite's own
+exec-time gate without a re-read. When the agent runs one (any spelling)
+the gate denies it, in any mode and whether or not anything is pending, and
+tells it to re-read the pending items or ask the operator.
 
 **What it does not catch** (out of scope; only an exec-time check — the
 kronicle-lite PATH shims — or nothing can):
@@ -378,7 +387,8 @@ Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itse
   The gate is on the union, per agent: a subagent that reads as its own
   actor is checked on those reads and on the shared server actor's, and
   naming another actor never clears what one of them has pending. The
-  parent is not gated on a subagent's private actor.
+  parent is not gated on a subagent's private actor. A stopped subagent's
+  actors are kept, so a resumed one (same `agent_id`) is gated on them.
 - With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the 0.4.0 rule
   decides when the gate is on: a blocking retraction that has not reached
   the agent yet (the deny delivers it; the retry runs).

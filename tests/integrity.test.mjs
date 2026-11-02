@@ -140,7 +140,11 @@ test('unavailable (stub printing non-JSON): fail-open, logged, one "feed offline
     for (let i = 0; i < 6; i++) outs.push(w.ctx(w.post(`c${i}`)));
     assert.deepEqual(outs.map((o) => (o ? 'A' : '-')).join(''), '---A--', 'advisory exactly once, on the 4th consecutive unreadable call');
     assert.match(outs[3], /retraction feed has been offline for 4 consecutive tool calls/);
-    assert.equal(w.pre('./bin/deploy --target b').stdout, '', 'the pulse fails open (no deny) while the feed is offline');
+    // 0.5.1 (H2-11): the store may have changed since the last answer and cannot be read → fail closed
+    const d = w.pre('./bin/deploy --target b');
+    assert.equal(w.decision(d), 'deny', 'not "nothing pending": the last answer is stale');
+    assert.match(w.reason(d), /could not be read just now/);
+    assert.equal(w.pre('cat docs/runbook.md').stdout, '', 'read-only calls still run');
     assert.match(w.log(), /orient failed|timed out/);
     // back online: the counter and the advisory latch reset
     fs.writeFileSync(path.join(w.sb.base, 'kl-stub.mjs'), good);

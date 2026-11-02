@@ -7,7 +7,7 @@ SemVer.
 ## [0.5.1] — 2026-11-01
 
 Fixes the pending gate after hardening round 2 (agent-memory-bench
-`hardening-hooks` @ 3b10850, `stress/findings/hooks.md`: one S1, six S2).
+`hardening-hooks` @ 3b10850 and 386db8c, `stress/findings/hooks.md`).
 The gate no longer tries to find dangerous commands in shell text.
 
 ### Changed
@@ -55,6 +55,25 @@ The gate no longer tries to find dangerous commands in shell text.
   naming another actor never clears a pending change. Per agent: a
   subagent with its own actor is gated on it and on the server actor; the
   parent is not gated on a subagent's private actor.
+- **H2-10 (S1)**: a subagent's learned actors survived nothing: `SubagentStop`
+  deleted them with its cursor, so a resumed subagent (same `agent_id`) was
+  gated on the server actor and its `git push` allowed with the "none of it
+  blocks" text. `SubagentStop` now drops the cursor files but keeps
+  `<sid8>.a-<agent>.actors`.
+- **H2-11**: during the 60 s back-off after one slow read the pulse used the
+  cached pending count (0, from before the change) and allowed silently.
+  The pulse no longer honours the back-off (the push still does): when the
+  store may have changed it reads, bounded by `push_timeout`; when that read
+  fails and the agent has had an answer before, the cached answer is stale,
+  not "clear" — every call that is not read-only is denied (`pulse_mode:
+  warn`: warned) with "kronicle-lite could not be read just now". A CLI
+  that never answered in this session still fails open.
+- **H2-12 (cc-anchor side)**: `kronicle-lite shim ack`, `shim install` /
+  `uninstall` and `pending ack` (any spelling: npx, node …/cli.js, quoted,
+  behind an assignment) clear or reconfigure kronicle-lite's own gate
+  without a re-read. The pulse denies them in any mode, pending or not,
+  even without kronicle-lite configured, and tells the agent to re-read the
+  pending items or ask the operator.
 - **H2-08**: `~/.claude.json` `projects[…]` is looked up by the literal
   project path and by its physical (symlink-resolved) path (also for
   sea-lite detection).
@@ -71,8 +90,9 @@ The gate no longer tries to find dangerous commands in shell text.
 - `tests/stress/gate.sh` (the round-2 harness, 29 checks verbatim + 36 for
   0.5.1: nothing pending → nothing denied, read-only calls run while
   pending, the deny text, re-read via the CLI, actor union, fail closed /
-  open, 100 KB command, warn mode) runs from `tests/stress.test.mjs`
-  against the real kronicle-lite 0.8.0.
+  open, 100 KB command, warn mode; from 386db8c: `backoff`, `offline`,
+  `substop_pending`, plus `backoff_broken` and `ack`) runs from
+  `tests/stress.test.mjs` against the real kronicle-lite 0.8.0.
 - `tests/stress/pulse-corpus.sh` (85 cases) and `pulse-corpus2.sh` (125)
   under 0.5.1 rules: no world-changing case reads as read-only, harmless
   reads stay read-only; run from `tests/push.test.mjs` with new

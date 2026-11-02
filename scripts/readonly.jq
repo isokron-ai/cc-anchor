@@ -9,7 +9,8 @@
 #
 # Input: the PreToolUse payload (.tool_input.command). Args: $max (bytes).
 # Output (one compact JSON line):
-#   { ro: true|false, why: "<why it is not read-only>", head: "<first line, <= 120 chars>" }
+#   { ro: true|false, why: "<why it is not read-only>", head: "<first line, <= 120 chars>",
+#     ack: true when it runs an operator-only kronicle-lite override (H2-12) }
 #
 # Read-only means: a list of simple commands joined by && || ; | or
 # newlines, each of them on the allowlist below with only safe options:
@@ -198,15 +199,37 @@ def cmd_ok:
         end
     end;
 
+# H2-12: the words after the kronicle-lite CLI when a simple command runs it
+# (kronicle-lite …, npx [-y] kronicle-lite[@v] …, node …/kronicle-lite/dist/
+# cli.js …; leading assignments and env/sudo/command/exec/nohup/time are
+# skipped), else null.
+def klargs:
+  (until(length == 0 or ((.[0].v | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=") or IN("env", "sudo", "command", "exec", "nohup", "time", "builtin")) | not); .[1:])) as $w
+  | ($w[0].v // "" | sub("^.*/"; "")) as $b
+  | if $b == "kronicle-lite" then $w[1:]
+    elif $b == "npx" then ($w[1:] | until(length == 0 or (.[0].v | IN("-y", "--yes", "-q", "--quiet") | not); .[1:])) as $r
+      | (if ($r | length) > 0 and ($r[0].v | test("^kronicle-lite(@.*)?$")) then $r[1:] else null end)
+    elif $b | IN("node", "nodejs") then (if ($w[1].v // "" | test("kronicle-lite/dist/cli\\.js$")) then $w[2:] else null end)
+    else null end;
+# Operator-only overrides of kronicle-lite's own gate: `shim ack`,
+# `shim install|uninstall` (reconfigures or removes the shims), `pending ack`.
+def override: (map(.v)) as $a
+  | (($a[0] // "") == "shim" and (($a[1] // "") | IN("ack", "install", "uninstall")))
+    or (($a[0] // "") == "pending" and ($a | index("ack")) != null)
+    or (($a[0] // "") == "ack");
+def raw_override: test("\\b(shim|pending)\\s+['\"]?(ack|install|uninstall)\\b");
+
 ((.tool_input.command // "") | tostring) as $cmd
 | ($max | tonumber? // 8192) as $lim
 | ($cmd | head1) as $head
-| (if ($cmd | utf8bytelength) > $lim then {ro: false, why: "the command is longer than \($lim) bytes", head: $head}
+| (if ($cmd | utf8bytelength) > $lim then {ro: false, why: "the command is longer than \($lim) bytes", head: $head, ack: ($cmd | raw_override)}
    else ($cmd | parse) as $p
-     | if $p.bad != null then {ro: false, why: $p.bad, head: $head}
+     | if $p.bad != null then {ro: false, why: $p.bad, head: $head, ack: ($cmd | raw_override)}
        else ([$p.cmds[] | cmd_ok | select(. != null)] | first) as $why
-         | {ro: ($why == null), why: ($why // ""), head: $head}
+         | ([$p.cmds[] | klargs | select(. != null) | override] | any) as $ov
+         | {ro: ($why == null and ($ov | not)), why: (if $ov then "an operator-only kronicle-lite override" else ($why // "") end), head: $head,
+            ack: ($ov or (($why != null) and ($cmd | raw_override)))}
        end
    end)
 # --arg fmt line (pulse.sh): one "ro\u001fwhy\u001fhead" line for bash.
-| if ($ARGS.named.fmt // "") == "line" then "\(.ro)\u001f\(.why | gsub("[[:cntrl:]]"; " "))\u001f\(.head | gsub("[[:cntrl:]]"; " "))" else . end
+| if ($ARGS.named.fmt // "") == "line" then "\(.ro)\u001f\(.why | gsub("[[:cntrl:]]"; " "))\u001f\(.head | gsub("[[:cntrl:]]"; " "))\u001f\(.ack)" else . end

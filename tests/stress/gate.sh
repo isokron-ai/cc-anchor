@@ -19,6 +19,9 @@ kl() { (cd "$P" && node "$KLBIN" "$@" --data-dir "$DD"); }
 setup() {
   W=$(mktemp -d "$TMPROOT/gate.XXXXXX"); P=$W/proj; DD=$W/kl; mkdir -p "$P/.claude" "$W/home"; git -C "$P" init -q
   export HOME=$W/home CLAUDE_PROJECT_DIR=$P CC_ANCHOR_KRONICLE_LITE_BIN=$KLBIN CC_ANCHOR_SEA=0
+  # a CLI wrapper the cases can slow down / break: touch $W/slow (sleep 5 s) or $W/broken (exit 1)
+  printf '#!/bin/bash\n[ -e %q/slow ] && sleep 5\n[ -e %q/broken ] && { echo "{oops"; exit 1; }\nexec node %q "$@"\n' "$W" "$W" "$KLBIN" > "$W/klwrap"; chmod +x "$W/klwrap"
+  [[ -n "${WRAP:-}" ]] && export CC_ANCHOR_KRONICLE_LITE_BIN=$W/klwrap
   unset CC_ANCHOR_KRONICLE_ACTOR CC_ANCHOR_PULSE_MODE KRONICLE_LITE_ACTOR KRONICLE_LITE_DATA_DIR
   local f=${MCP:-'{mcpServers:{"kronicle-lite":{command:"node",args:[$kl,"serve","--data-dir",$dd,"--actor","agent-a"]}}}'}
   jq -n --arg kl "$KLBIN" --arg dd "$DD" "$f" > "${MCPFILE:-$P/.mcp.json}"
@@ -138,15 +141,42 @@ if run fail_closed; then setup; pulse "git push" >/dev/null
   touch "$DD/kronicle-lite.db"
   expect_deny "pending known, kronicle-lite now failing: fail closed on the last answer" "git push"
   expect_allow "…read-only still runs" "cat runbook.md"; done_; fi
-if run fail_open; then setup; kl get runbook --actor agent-a >/dev/null; pulse "make" >/dev/null
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$W/broken-kl"; chmod +x "$W/broken-kl"
-  cfg="$P/.claude/cc-anchor/push/sess0001.cfg"; { sed -n 1p "$cfg"; echo "$W/broken-kl"; sed -n 3p "$cfg"; } > "$cfg.n" && mv "$cfg.n" "$cfg"
-  touch "$DD/kronicle-lite.db"
-  expect_allow "nothing known pending, kronicle-lite failing: fail open" "git push"; done_; fi
+if run fail_open; then WRAP=1 MCPFILE=/dev/null setup; rm -rf "$P/.claude/cc-anchor/push"; touch "$W/broken"
+  export SID=sess-0009-zzzz CC_ANCHOR_KRONICLE=1 CC_ANCHOR_KRONICLE_DATA_DIR=$DD
+  expect_allow "kronicle-lite broken since the session started (never an answer): fail open" "git push"
+  unset CC_ANCHOR_KRONICLE CC_ANCHOR_KRONICLE_DATA_DIR; export SID=sess-0001-aaaa; done_; fi
 if run big; then setup; big="printf %s '$(head -c 102400 /dev/zero | tr '\0' x)' > f; git push"
   s=$(date +%s); expect_deny "100 KB command then git push (H2-09): denied, not timed out" "$big"; e=$(date +%s)
   (( e - s < 8 )) && ok "100 KB command classified in $((e - s)) s (< 8 s; hook timeout 15 s)" || bad "100 KB command took $((e - s)) s"; done_; fi
 if run warn; then setup; export CC_ANCHOR_PULSE_MODE=warn; o=$(pulse "git push"); unset CC_ANCHOR_PULSE_MODE
   [[ "$o" != *deny* && "$o" == *"pulse (warn)"* ]] && ok "pulse_mode=warn: allowed with the pending list as context" || bad "warn: ${o:0:160}"; done_; fi
+
+# --- round 2, part 2 (agent-memory-bench 386db8c): back-off, offline, subagent stop/resume, ack
+if run backoff; then WRAP=1 setup  # klpend cached with count 0 (before the change); store now has pending 1
+  touch "$W/slow"; t0=$(date +%s%N); hook post-tool-use.sh PostToolUse >/dev/null; t=$(( ($(date +%s%N)-t0)/1000000 )); rm -f "$W/slow"
+  echo "     one slow read: post-tool-use ${t} ms (push_timeout 3 s); store healthy again, pending(agent-a)=$(pend)"
+  expect_deny "H2-11: deploy within 60 s of ONE slow read (store healthy again, pending 1)" "git push"; done_; fi
+if run backoff_broken; then WRAP=1 setup; touch "$W/slow"; hook post-tool-use.sh PostToolUse >/dev/null; rm -f "$W/slow"; touch "$W/broken"
+  r=$(reason "git push")
+  [[ "$r" == *"could not be read just now"* ]] && ok "H2-11: in the back-off with the CLI now failing: denied, the cached 0 is not 'clear'" || bad "back-off + broken CLI: ${r:0:160}"
+  export CC_ANCHOR_PULSE_MODE=warn; o=$(pulse "git push"); unset CC_ANCHOR_PULSE_MODE
+  [[ "$o" != *'"deny"'* && "$o" == *"could not be read just now"* ]] && ok "…warn mode: warned" || bad "warn: ${o:0:160}"
+  expect_allow "…read-only still runs" "cat runbook.md"; done_; fi
+if run offline; then WRAP=1 setup; touch "$W/broken"; n=0; first=0
+  for i in $(seq 1 30); do o=$(hook post-tool-use.sh PostToolUse); if [[ "$o" == *"offline for"* ]]; then n=$((n+1)); (( first )) || first=$i; fi; done
+  [[ $n == 1 ]] && ok "feed-offline advisory given once (at call $first of 30)" || bad "feed-offline advisory given $n times in 30 broken calls"
+  # 0.5.0 failed open here "by design"; since 0.5.1 (H2-11) a store that changed since the last answer and cannot be read denies
+  o=$(pulse "git push"); [[ "$o" == *'"deny"'* && "$o" == *"could not be read just now"* ]] && ok "pulse fails closed while the CLI is broken and the store changed (H2-11)" || bad "pulse with a broken CLI: ${o:0:160}"; done_; fi
+if run substop_pending; then READER=sub-1 setup; hook subagent-start.sh SubagentStart ag-1 >/dev/null
+  hook post-tool-use.sh PostToolUse ag-1 '{"tool_name":"mcp__kronicle-lite__recall","tool_input":{"query":"deploy","actor_id":"sub-1"}}' >/dev/null
+  hook subagent-stop.sh SubagentStop ag-1 >/dev/null; left=$(ls "$P/.claude/cc-anchor/push" | grep 'a-ag-1' | grep -v '\.actors$' | tr '\n' ' ')
+  [[ -z "$left" && -s "$P/.claude/cc-anchor/push/sess0001.a-ag-1.actors" ]] && ok "SubagentStop drops the subagent's cursor files, keeps the actors it read as" || bad "SubagentStop left: ${left:-none}; actors kept: $(cat "$P/.claude/cc-anchor/push/sess0001.a-ag-1.actors" 2>/dev/null)"
+  hook subagent-start.sh SubagentStart ag-1 >/dev/null; PA=sub-1 expect_deny "H2-10: agent_id reused after stop, first call is a deploy (actor sub-1 still pending)" "git push" ag-1; done_; fi
+if run ack; then setup
+  for c in "node $KLBIN shim ack --through 7" "npx -y kronicle-lite@0.8.0 shim ack" 'kronicle-lite shim uninstall' "A=1 kronicle-lite shim 'ack'" "node $KLBIN pending ack"; do
+    r=$(reason "$c"); [[ "$r" == *"operator's decision"* && "$r" == *"Re-read the pending items"* ]] && ok "H2-12: \`${c:0:40}\` denied as operator-only" || bad "H2-12: \`$c\`: ${r:0:120}"; done
+  kl get runbook --actor agent-a >/dev/null
+  r=$(reason "kronicle-lite shim ack"); [[ "$r" == *"operator's decision"* ]] && ok "H2-12: denied with nothing pending too" || bad "H2-12 nothing pending: ${r:0:120}"
+  expect_allow "H2-12: \`kronicle-lite shim status\` is not an override" "kronicle-lite shim status"; done_; fi
 
 echo; echo "gate: pass=$pass fail=$fail"; exit $(( fail > 0 ))

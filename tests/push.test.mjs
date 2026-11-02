@@ -82,6 +82,18 @@ test('readonly.jq: everything else is not read-only, with the reason', () => {
   }
 });
 
+test('readonly.jq: operator-only kronicle-lite overrides are flagged (H2-12) and never read-only', () => {
+  for (const c of ['kronicle-lite shim ack --through 7', 'npx -y kronicle-lite@0.8.0 shim ack', "A=1 kronicle-lite shim 'ack'", 'cd x && kronicle-lite shim uninstall',
+    'kronicle-lite shim install --mode warn', 'node node_modules/kronicle-lite/dist/cli.js pending ack', 'echo $(kronicle-lite shim ack)']) {
+    const r = classify(c);
+    assert.equal(r.ack, true, `override: ${c}`);
+    assert.equal(r.ro, false, c);
+  }
+  for (const c of ['kronicle-lite shim status', "grep -n 'shim ack' README.md", 'echo kronicle-lite shim ack', 'kronicle-lite pending --actor a', 'git push']) {
+    assert.equal(classify(c).ack, false, `not an override: ${c}`);
+  }
+});
+
 test('readonly.jq: a command over pulse_max_bytes is not read-only, and is classified fast (H2-09)', () => {
   const big = `printf %s '${'x'.repeat(204800)}' > f; git push`;
   const t0 = Date.now();
