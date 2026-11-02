@@ -48,7 +48,8 @@ for (const f of ['bash-guard.sh', 'bash-guard2.sh', 'scope-guard.sh']) {
     try {
       const r = spawnSync('bash', [path.join(ROOT, 'tests', 'stress', f)], {
         encoding: 'utf8',
-        env: { PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, TMPROOT: tmp, CCA: ROOT, SLBIN: SL, TZ: 'UTC', CC_ANCHOR_SYNC: '1' },
+        // no CC_ANCHOR_SYNC: the harness hangs sea-lite on purpose, and an inline heartbeat would wait for it
+        env: { PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, TMPROOT: tmp, CCA: ROOT, SLBIN: SL, TZ: 'UTC' },
       });
       const fails = r.stdout.split('\n').filter((l) => l.startsWith('FAIL'));
       assert.deepEqual(fails, [], r.stdout.slice(-3000) + r.stderr.slice(-2000));

@@ -1465,10 +1465,10 @@ cc_bg_check() {
   if cc_bg_stale; then cc_bg_refresh || true; fi
   local advice=""
   if [[ -s "$CC_BG_D/claims.degraded" ]]; then
-    local drc="" good="" nowd age="never"; IFS= read -r drc < "$CC_BG_D/claims.degraded"
+    local drc="" good="" nowd what="has no claims to check against"; IFS= read -r drc < "$CC_BG_D/claims.degraded"
     [[ -s "$CC_BG_D/claims.good" ]] && IFS= read -r good < "$CC_BG_D/claims.good"
-    cc_epoch_now_var nowd; [[ "$good" =~ ^[0-9]+$ ]] && age="$((nowd - good)) s ago"
-    cc_sea_advise "$sid" "sea-lite board $([[ "$drc" == 124 ]] && echo "timed out" || echo "failed (exit $drc)"); the Bash guard is using the claims it last saw ($age)" && advice="$CC_SEA_ADVICE"
+    cc_epoch_now_var nowd; [[ "$good" =~ ^[0-9]+$ ]] && what="is using the claims it saw $((nowd - good)) s ago"
+    cc_sea_advise "$sid" "sea-lite board $([[ "$drc" == 124 ]] && echo "timed out" || echo "failed (exit $drc)"); the Bash guard ${what}" && advice="$CC_SEA_ADVICE"
   elif [[ -e "$CC_BG_D/claims.good" ]]; then
     cc_sea_recovered "$sid"
   fi
