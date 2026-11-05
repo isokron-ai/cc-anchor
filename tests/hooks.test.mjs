@@ -425,7 +425,7 @@ test('statusline install: refuses to overwrite a foreign statusLine (exit 3), --
 
 test('hooks.json references only scripts that exist, in exec form, with timeouts', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
-  assert.deepEqual(Object.keys(hooks).sort(), ['InstructionsLoaded', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'TaskCompleted', 'TaskCreated', 'UserPromptSubmit']);
+  assert.deepEqual(Object.keys(hooks).sort(), ['InstructionsLoaded', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'TaskCompleted', 'TaskCreated', 'UserPromptSubmit']);
   for (const [ev, groups] of Object.entries(hooks)) {
     for (const g of groups) for (const h of g.hooks) {
       assert.equal(h.type, 'command', ev);
