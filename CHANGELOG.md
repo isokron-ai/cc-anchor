@@ -4,6 +4,22 @@ All notable changes to cc-anchor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 SemVer.
 
+## [Unreleased]
+
+### Fixed
+- **Pending gate shared across subagents (L2-05, hardening-live).** One
+  agent's re-read cleared the gate for every agent of the session (they
+  share the MCP server's kronicle-lite actor), and a subagent started after
+  the coordinator had consumed the push got neither the push nor a deny.
+  Each agent now has its own reconciliation ledger (`scripts/owed.jq`;
+  `<sid8>[.a-<agent>].owed/.done/.reads` under `push/`): it is denied until
+  its own tool result shows the current version. A newer change of the same
+  block replaces the owed item; a subagent first seen alive inherits what
+  the session still owes; SubagentStop parks the ledger and a resume with
+  the same `agent_id` takes it back. Inert on kronicle-lite ≤ 0.7.0.
+- `cc_kl_pending_fmt` moved into `scripts/owed.jq` (mode `fmt`) so the gate
+  and the ledger print the same pending lines.
+
 ## [0.5.1] — 2026-11-01
 
 Fixes the pending gate after hardening round 2 (agent-memory-bench

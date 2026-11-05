@@ -180,12 +180,41 @@ if [[ -e "$CC_KL_S.klcap" ]]; then
     items="${items:+$items
 }${it}"
   done
+  # 0.5.2 (L2-05): what THIS agent still owes a re-read of (scripts/owed.jq).
+  # kronicle-lite's count above is per actor, and the session's agents share
+  # it: another agent's re-read clears that count, never this ledger.
+  owed_n=0; owed_x=""; me="$(cc_kl_who "$CC_KL_B")"
+  if [[ -s "$CC_KL_B.owed" ]]; then
+    while IFS= read -r l; do
+      [[ -n "$l" ]] || continue
+      owed_n=$((owed_n + 1))
+      (( owed_n <= 6 )) || continue
+      # listed already (same line from kronicle-lite's own pending) or not
+      if [[ -n "$items" ]] && grep -Fxq -- "$l" <<<"$items"; then continue; fi
+      owed_x="${owed_x:+$owed_x
+}${l}"
+    done < <(jq -r 'fromjson? | .line // empty' -R "$CC_KL_B.owed" 2>/dev/null)
+    (( owed_n > 6 )) && owed_x="${owed_x:+$owed_x
+}- … and $((owed_n - 6)) more"
+  fi
+  REREAD="Re-read each yourself (recall, kronicle://docs/<slug>, or \`kronicle-lite get <slug>\`): that clears this check by itself — receiving or acknowledging a change, retrying, reading as another actor, or another agent of this session re-reading it does not. Then check the values this command uses and run it again."
   if (( total > 0 )); then
     rm -f "$CC_KL_B.pending" 2>/dev/null   # shown here; the retraction rule must not repeat it after the re-read
     if [[ "$acts" == *", "* ]]; then who="you relied on (as actors ${acts})"; else who="you (actor ${acts}) relied on"; fi
+    also=""
+    [[ -n "$owed_x" ]] && also="
+Also not re-read by you (${me}) yet — another agent of this session re-read them, which does not tell you what changed:
+${owed_x}"
     gate "${total} pending for ${acts}" "${total} kronicle-lite change(s) ${who} are not re-read at their current version:
-${items}" "Until you re-read them, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}.
-Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itself — receiving or acknowledging a change, retrying, or reading as another actor does not. Then check the values this command uses and run it again.${actor_note}"
+${items}${also}" "Until you re-read them, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}.
+${REREAD}${actor_note}"
+  fi
+  if (( owed_n > 0 )); then
+    rm -f "$CC_KL_B.pending" 2>/dev/null
+    gate "${owed_n} not re-read by ${me}" "${owed_n} kronicle-lite change(s) not re-read by you (${me}) at their current version:
+${owed_x}
+These are yours: kronicle-lite counts reads per actor and this session's agents share actor ${CC_KL_ACTOR}, so its count clears when any of them re-reads (or writes) the document — but you have not re-read these yourself, and anything you read or were handed before the change is stale." "Until you re-read them, only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}.
+${REREAD}${actor_note}"
   fi
   (( unknown )) && gate_unknown
   # Actor unknown: fall through to the retraction rule below.

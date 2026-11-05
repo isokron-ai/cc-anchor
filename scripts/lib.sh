@@ -677,6 +677,7 @@ cc_payload_agent() {
 # everything the parent has not consumed yet reaches the subagent too.
 # Falls back to the head when the parent has no cursor. Main agent: init.
 cc_kl_seed() {
+  [[ -n "$CC_KL_AGENT" && ! -e "$CC_KL_B.live" ]] && cc_kl_inherit
   if [[ -n "$CC_KL_AGENT" && -s "$CC_KL_S.cursor" ]]; then
     cp -f "$CC_KL_S.cursor" "$CC_KL_B.cursor.$$" 2>/dev/null && mv -f "$CC_KL_B.cursor.$$" "$CC_KL_B.cursor" || return 1
     if [[ -s "$CC_KL_S.seq" ]]; then cp -f "$CC_KL_S.seq" "$CC_KL_B.seq" 2>/dev/null || true; fi
@@ -691,6 +692,9 @@ cc_kl_forget() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
   rm -f "$CC_KL_B.cursor" "$CC_KL_B.seq" "$CC_KL_B.stamp" "$CC_KL_B.pending" "$CC_KL_B.parked" "$CC_KL_B.intwarned" "$CC_KL_B.oneliner" \
         "$CC_KL_B.klpend" "$CC_KL_B.pendcalls" "$CC_KL_B.reminded" "$CC_KL_B.wcattempt" "$CC_KL_B".xp-* 2>/dev/null || true
+  # 0.5.2: its reconciliation ledger is parked (<S>.stopped/a-<id>.*), still
+  # fed while it is stopped, and taken back if the same agent_id resumes.
+  cc_kl_ledger_park
   # The actors it read as (<B>.actors, and 0.5.0's <B>.actor) stay: a resumed
   # subagent comes back with the same agent_id, and what it read before the
   # stop is still pending for it (0.5.1, H2-10).
@@ -797,9 +801,14 @@ cc_kl_extra_pending() {
   wait "${bg[@]}" 2>/dev/null
   for a in "${todo[@]}"; do
     f="$(cc_kl_xp_file "$a")"
-    local r=""; [[ -s "$f.raw.$$" ]] && r="$(cc_kl_pending_fmt "$(cat "$f.raw.$$")")"
+    local r="" raw=""; [[ -s "$f.raw.$$" ]] && raw="$(cat "$f.raw.$$")" && r="$(cc_kl_pending_fmt "$raw")"
     rm -f "$f.raw.$$" 2>/dev/null
-    if [[ -n "$r" && "$r" != nocap ]]; then printf '%s\n' "$r" > "$f" 2>/dev/null; else n=$((n + 1)); fi
+    if [[ -n "$r" && "$r" != nocap ]]; then
+      printf '%s\n' "$r" > "$f" 2>/dev/null
+      # 0.5.2: pending for an actor_id agents passed themselves: owed by the
+      # agents that used it (known), not by every agent.
+      [[ "${r%%$'\x1f'*}" =~ ^[1-9][0-9]*$ ]] && cc_kl_ledger_feed "$raw" "$a"
+    else n=$((n + 1)); fi
   done
   CC_KL_XFAIL=$n
   (( n > 0 )) && cc_log_once kl_xperr "pulse: kronicle-lite pending could not be read for ${n} extra actor(s); last known answers stand"
@@ -909,20 +918,7 @@ cc_kl_integrity_from() {
 # cc_kl_pending_fmt <orient or `pending --json` output> prints that text, or
 # "nocap" for a briefing without pending_count.
 cc_kl_pending_fmt() {
-  jq -r 'def clip($n): if . == null then null else tostring | gsub("\\s+"; " ") | if length > $n then .[0:$n - 1] + "…" else . end end;
-    if (.pending_count | type) != "number" then "nocap" else
-      "\(.pending_count)\u001f\(.pending_hidden // 0)\u001f\(.pending_actor // .actor_id // "")\u001f\([(.pending // [])[] | .doc_slug // empty] | unique | join(", "))",
-      ((.pending // [])[0:6][] |
-        "- " + ([(.doc_slug // empty), ((.heading_path // []) | map(tostring) | join(" › ") | select(. != ""))] | join(" › "))
-        + " (seq \(.seq // "?"), \(.change // .kind // "?")/\(.severity // "?")"
-        + (if (.read.head_seq // null) != null then "; you read it at seq \(.read.head_seq)" else "" end) + ")"
-        + ": read \"\(.old_text // "?" | clip(120))\" → "
-        + (if .current == null then "now REMOVED" else "now \"\(.new_text // "?" | clip(120))\"" end)
-        + (if .diff != null then "; diff: \(.diff | clip(200))" else "" end)
-        + (if (.derived_notes // []) | length > 0 then "; your notes derived from it: \((.derived_notes | map(if type == "object" then (.doc_slug // .slug // .block_id // "?") else tostring end) | join(", ")) | clip(120))" else "" end)
-        + (if .resolve != null then " — \(.resolve | clip(160))" else "" end)),
-      (if (.pending_count // 0) > 6 then "- … and \(.pending_count - 6) more (kronicle-lite pending --actor \(.pending_actor // .actor_id // "?"))" else empty end)
-    end' <<<"$1" 2>/dev/null
+  jq -r --arg mode fmt -f "$CC_LIB_DIR/owed.jq" <<<"$1" 2>/dev/null
 }
 
 cc_kl_pending_note() {
@@ -940,6 +936,11 @@ cc_kl_pending_note() {
   # A fresh briefing means the store may have changed: the extra actors'
   # answers are re-read the next time the gate needs them.
   [[ -s "$CC_KL_B.actors" ]] && rm -f "$CC_KL_B".xp-* 2>/dev/null
+  # 0.5.2 (L2-05): pending for the configured actor — shared by every agent
+  # of the session, so whose read it was is unknown: every agent owes it.
+  # Retractions in the briefing move the agents' owed items forward.
+  local n="${r%%$'\x1f'*}"
+  if [[ "$n" =~ ^[1-9][0-9]*$ || "$1" == *'"successor_block_id"'* ]]; then cc_kl_ledger_feed "$1"; fi
   return 0
 }
 
@@ -1076,6 +1077,9 @@ cc_kl_unchanged() {
 # Sets KL_BODY ("- …" lines), KL_SHOWN, KL_BLOCK, KL_COS, KL_SEQ.
 cc_kl_fetch() {  # [strict] — see cc_kl_unchanged
   KL_BODY=""; KL_SHOWN=0; KL_BLOCK=0; KL_COS=0; KL_SEQ=""
+  # 0.5.2: a subagent first seen alive (no SubagentStart, or started under an
+  # older cc-anchor) inherits what the session's agents still owe.
+  [[ -n "$CC_KL_AGENT" && ! -e "$CC_KL_B.live" ]] && cc_kl_inherit
   if [[ ! -s "$CC_KL_B.cursor" ]]; then
     # Main agent without a cursor: start at the head (nothing is "new" yet).
     # Subagent without one (no SubagentStart seen): seed from the parent and
@@ -1213,6 +1217,8 @@ cc_kl_push() {
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
   cc_kl_fetch || true
+  # 0.5.2 (L2-05): this agent's own re-reads clear its ledger.
+  cc_kl_observe "$payload"
   # Top priority: a store that says it is corrupt (once per distinct problem).
   local warn=""
   if [[ -s "$CC_KL_S.integrity" ]]; then
@@ -1269,6 +1275,203 @@ $(cc_kl_actor_note)"
   fi
   (( KL_BLOCK > 0 )) && printf '%s\n' "$KL_BODY" > "$CC_KL_B.pending"
   cc_log "push: ${KL_SHOWN} retraction(s) (${KL_BLOCK} blocking, ${KL_COS} cosmetic) at seq ${KL_SEQ}"
+  return 0
+}
+
+# ═══════════════════ 0.5.2: per-agent reconciliation ledger (L2-05) ═══════════════════
+#
+# kronicle-lite's `pending` is per actor, and every agent of a Claude Code
+# session normally reads as the same actor (the MCP server's --actor). So one
+# subagent's re-read cleared the pending gate for all of them, and a subagent
+# started after the coordinator had consumed the push got neither the push
+# nor a deny. The gate now also holds each AGENT to its own re-reads:
+#
+#   <B>.owed   changes this agent has not re-read itself (JSONL; scripts/owed.jq)
+#   <B>.done   keys it re-read (a later feed never re-adds them)
+#   <B>.reads  kronicle-lite blocks / "doc:<slug>" it was SEEN reading
+#   <B>.fed    the last feed applied (identical feeds are skipped)
+#   <B>.live   (subagents) seen alive: SubagentStart, or its first hook
+#   <S>.stopped/a-<agent>.*   a stopped subagent's ledger, parked; it is still
+#              fed, and taken back if the same agent_id resumes
+#   <S>.lock   one lock (mkdir) for every write to another agent's ledger
+#
+# Who owes what (fail closed whenever attribution is uncertain):
+#   * pending for the configured actor: every agent of the session (the
+#     actor is shared, so whose read it was is unknown);
+#   * pending for an actor_id an agent passed on its MCP calls: the agents
+#     that used it;
+#   * a blocking retraction of a block or document an agent was seen reading
+#     (recall hit, document read, `kronicle-lite get`): that agent — this
+#     also catches a change written by another agent AS the shared actor,
+#     which kronicle-lite counts as that actor's read, so `pending` never
+#     lists it;
+#   * a subagent first seen alive inherits what every agent of the session
+#     still owes, and what they were seen reading (its parent is not named
+#     in SubagentStart, and anything it was told may be stale).
+# What clears it: only that agent's own tool result showing the current
+# version (scripts/owed.jq, mode clear). A later change of the same block
+# replaces the owed item with the newer one. Inert on kronicle-lite <= 0.7.0
+# (no `pending`: the 0.4.0 retraction rule decides there, as before).
+
+CC_KL_LOCKED=0
+
+cc_kl_lock() {
+  local l="$CC_KL_S.lock" i=0 t now
+  while ! mkdir "$l" 2>/dev/null; do
+    i=$((i + 1))
+    if (( i % 25 == 0 )); then
+      t=""; [[ -s "$l/at" ]] && IFS= read -r t < "$l/at"
+      cc_epoch_now_var now
+      if { [[ "$t" =~ ^[0-9]+$ ]] && (( now - t > 5 )); } || { [[ -z "$t" ]] && (( i >= 100 )); }; then
+        rm -f "$l/at" 2>/dev/null; rmdir "$l" 2>/dev/null
+        cc_log "push: broke a stale ledger lock"
+      fi
+    fi
+    if (( i > 150 )); then cc_log_once kl_lock "push: ledger lock busy for 3 s; updating without it"; return 1; fi
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  cc_epoch_now_var now; printf '%s\n' "$now" > "$l/at" 2>/dev/null
+  CC_KL_LOCKED=1
+}
+cc_kl_unlock() {
+  (( CC_KL_LOCKED )) || return 0
+  rm -f "$CC_KL_S.lock/at" 2>/dev/null; rmdir "$CC_KL_S.lock" 2>/dev/null; CC_KL_LOCKED=0
+}
+
+# Every ledger of the session, one prefix per line: the main agent, the
+# subagents seen alive, the parked ledgers of stopped ones.
+cc_kl_holders() {
+  local f
+  printf '%s\n' "$CC_KL_S"
+  for f in "$CC_KL_S".a-*.live; do [[ -e "$f" ]] && printf '%s\n' "${f%.live}"; done
+  for f in "$CC_KL_S.stopped"/a-*.done; do [[ -e "$f" ]] && printf '%s\n' "${f%.done}"; done
+  return 0
+}
+
+cc_kl_slurp() {  # <file> — its content ("" when missing), no fork for the read
+  [[ -s "$1" ]] || return 0
+  local __c; __c="$(< "$1")" 2>/dev/null && printf '%s' "$__c"
+}
+
+cc_kl_who() {  # <prefix> — "the main agent" / "subagent <id>"
+  local h="${1##*/}"; h="${h#"$CC_KL_SID"}"; h="${h#.}"
+  if [[ -z "$h" ]]; then printf 'the main agent'; else printf 'subagent %s' "${h#a-}"; fi
+}
+
+# cc_kl_ledger_feed <orient / pending JSON> [actor] — fold the pending items
+# and the retraction steps into every ledger (with [actor]: only those of the
+# agents that passed that actor_id). No-op on kronicle-lite <= 0.7.0.
+cc_kl_ledger_feed() {
+  [[ -e "$CC_KL_S.klcap" ]] || return 0
+  local feed only="${2:-}" h ap out prev n0 n1
+  feed="$(jq -r --arg mode feed -f "$CC_LIB_DIR/owed.jq" <<<"$1" 2>/dev/null)" || return 0
+  [[ "$feed" == '{"p":[],"r":[]}' || -z "$feed" ]] && return 0
+  local haspend=1; [[ "$feed" == '{"p":[],'* ]] && haspend=0
+  cc_kl_lock
+  while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    if [[ -n "$only" ]]; then
+      ap="${h/.stopped\//.}.actors"
+      if [[ ! -s "$ap" ]] || ! grep -Fxq -- "$only" "$ap" 2>/dev/null; then continue; fi
+    fi
+    # Steps only matter to a ledger that owes something or was seen reading.
+    (( haspend )) || [[ -s "$h.owed" || -s "$h.reads" ]] || continue
+    prev=""; [[ -s "$h.fed" ]] && prev="$(< "$h.fed")"
+    [[ "$prev" == "$feed" ]] && continue
+    out="$(jq -nr --arg mode reg --arg feed "$feed" --arg owed "$(cc_kl_slurp "$h.owed")" \
+            --arg "done" "$(cc_kl_slurp "$h.done")" --arg reads "$(cc_kl_slurp "$h.reads")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || continue
+    n0=0; [[ -s "$h.owed" ]] && n0="$(grep -c . "$h.owed" 2>/dev/null)"
+    if [[ -n "$out" ]]; then printf '%s\n' "$out" > "$h.owed.$$" 2>/dev/null && mv -f "$h.owed.$$" "$h.owed"
+    else rm -f "$h.owed" 2>/dev/null; fi
+    printf '%s' "$feed" > "$h.fed" 2>/dev/null
+    n1=0; [[ -n "$out" ]] && n1="$(grep -c . <<<"$out")"
+    [[ "$n0" != "$n1" ]] && cc_log "push: ledger: $(cc_kl_who "$h") owes ${n1} re-read(s) (was ${n0})${only:+ (actor ${only:0:64})}"
+  done < <(cc_kl_holders)
+  cc_kl_unlock
+  return 0
+}
+
+# cc_kl_inherit — a subagent seen alive for the first time takes what every
+# agent of the session still owes and was seen reading (its parent is not
+# named, and anything it was handed may be stale), plus its own parked
+# ledger when its agent_id resumes after a stop.
+cc_kl_inherit() {
+  [[ -n "$CC_KL_AGENT" ]] || return 0
+  mkdir -p "$CC_RUN/push" 2>/dev/null || return 0
+  local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" h x owed="" reads="" out n
+  cc_kl_lock
+  for x in owed "done" reads; do
+    if [[ -e "$P.$x" ]]; then cat "$P.$x" >> "$CC_KL_B.$x" 2>/dev/null; rm -f "$P.$x" 2>/dev/null; fi
+  done
+  rm -f "$P.fed" 2>/dev/null
+  while IFS= read -r h; do
+    [[ -n "$h" && "$h" != "$CC_KL_B" ]] || continue
+    [[ -s "$h.owed" ]] && owed="${owed}$(< "$h.owed")"$'\n'
+    [[ -s "$h.reads" ]] && reads="${reads}$(< "$h.reads")"$'\n'
+  done < <(cc_kl_holders)
+  if [[ -n "$owed" || -s "$CC_KL_B.owed" ]]; then
+    out="$(jq -nr --arg mode merge --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")"$'\n'"$owed" --arg "done" "$(cc_kl_slurp "$CC_KL_B.done")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || out=""
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out" > "$CC_KL_B.owed.$$" 2>/dev/null && mv -f "$CC_KL_B.owed.$$" "$CC_KL_B.owed"
+      n="$(grep -c . <<<"$out")"
+      cc_log "push: ledger: $(cc_kl_who "$CC_KL_B") starts owing ${n} re-read(s) the session's agents still owe"
+    fi
+  fi
+  if [[ -n "$reads" ]]; then
+    { cc_kl_slurp "$CC_KL_B.reads"; [[ -s "$CC_KL_B.reads" ]] && echo; printf '%s' "$reads"; } | grep . | sort -u > "$CC_KL_B.reads.$$" 2>/dev/null \
+      && mv -f "$CC_KL_B.reads.$$" "$CC_KL_B.reads"
+  fi
+  : > "$CC_KL_B.live" 2>/dev/null
+  cc_kl_unlock
+  return 0
+}
+
+# cc_kl_ledger_park — SubagentStop: move the ledger aside (not deleted).
+cc_kl_ledger_park() {
+  [[ -n "$CC_KL_AGENT" ]] || return 0
+  [[ -e "$CC_KL_B.live" || -e "$CC_KL_B.owed" || -e "$CC_KL_B.done" || -e "$CC_KL_B.reads" ]] || return 0
+  local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" x
+  mkdir -p "$CC_KL_S.stopped" 2>/dev/null || return 0
+  cc_kl_lock
+  for x in owed "done" reads; do
+    if [[ -e "$CC_KL_B.$x" ]]; then cat "$CC_KL_B.$x" >> "$P.$x" 2>/dev/null; rm -f "$CC_KL_B.$x" 2>/dev/null; fi
+    [[ -e "$P.$x" ]] || : > "$P.$x" 2>/dev/null
+  done
+  rm -f "$CC_KL_B.live" "$CC_KL_B.fed" 2>/dev/null
+  cc_kl_unlock
+}
+
+# cc_kl_observe <PostToolUse payload> — what this tool result shows the agent
+# read: owed items it re-read at the current version clear (for this agent
+# only), and the blocks / documents it read are remembered. The jq runs only
+# when the result can carry kronicle-lite content (a block_id, a
+# kronicle://docs/ resource, a Bash `kronicle-lite get`).
+cc_kl_observe() {
+  [[ -e "$CC_KL_S.klcap" ]] || return 0
+  local p="$1"
+  if [[ "$p" == *'block_id'* || "$p" == *'kronicle://docs/'* ]]; then :
+  elif [[ "$p" =~ \"tool_name\":[[:space:]]*\"Bash\" && "$p" =~ (kronicle-lite|cli\.m?js)[\"\']?[[:space:]]+get ]]; then :
+  else return 0; fi
+  local out held=0 tag v owed="" cleared="" forget="" reads=""
+  if [[ -s "$CC_KL_B.owed" ]]; then cc_kl_lock && held=1; fi
+  out="$(jq -r --arg mode clear --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")" -f "$CC_LIB_DIR/owed.jq" <<<"$p" 2>/dev/null)" || out=""
+  while IFS=$'\t' read -r tag v; do
+    case "$tag" in
+      O) owed="${owed}${v}"$'\n';; C) cleared="${cleared}${v}"$'\n';;
+      F) forget="${forget}${v}"$'\n';; R) reads="${reads}${v}"$'\n';;
+    esac
+  done <<<"$out"
+  if [[ -n "$cleared" ]]; then
+    if [[ -n "$owed" ]]; then printf '%s' "$owed" > "$CC_KL_B.owed.$$" 2>/dev/null && mv -f "$CC_KL_B.owed.$$" "$CC_KL_B.owed"
+    else rm -f "$CC_KL_B.owed" 2>/dev/null; fi
+    printf '%s' "$cleared" >> "$CC_KL_B.done" 2>/dev/null
+    cc_log "push: ledger: $(cc_kl_who "$CC_KL_B") re-read $(grep -c . <<<"$cleared") change(s) at the current version; $(grep -c . <<<"$owed") still owed"
+  fi
+  (( held )) && cc_kl_unlock
+  if [[ -n "$reads" || -n "$forget" ]]; then
+    { cc_kl_slurp "$CC_KL_B.reads"; echo; printf '%s' "$reads"; } | grep . | { if [[ -n "$forget" ]]; then grep -Fvx -- "$forget"; else cat; fi; } | sort -u > "$CC_KL_B.reads.$$" 2>/dev/null
+    mv -f "$CC_KL_B.reads.$$" "$CC_KL_B.reads" 2>/dev/null
+  fi
   return 0
 }
 

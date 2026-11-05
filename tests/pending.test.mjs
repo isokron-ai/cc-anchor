@@ -36,6 +36,12 @@ function world(extraEnv = {}) {
   const kl = (...a) => spawnSync('node', [KL, ...a, '--data-dir', data], { encoding: 'utf8', cwd: sb.proj });
   const put = (content) => { const f = path.join(sb.base, `rb-${Math.random()}.md`); fs.writeFileSync(f, content); assert.equal(kl('put', 'runbook', f).status, 0); };
   const read = (actor = 'local-agent') => assert.equal(kl('get', 'runbook', '--actor', actor).status, 0);
+  // 0.5.2 (L2-05): a re-read counts for the agent whose own tool result shows it
+  const reread = (actor = 'local-agent', agent = null) => {
+    const r = kl('get', 'runbook', '--actor', actor);
+    assert.equal(r.status, 0);
+    hook('post-tool-use.sh', { session_id: SID, cwd: sb.proj, hook_event_name: 'PostToolUse', ...(agent ? { agent_id: agent, agent_type: 'general-purpose' } : {}), tool_name: 'Bash', tool_input: { command: `kronicle-lite get runbook --actor ${actor}` }, tool_response: { stdout: r.stdout, stderr: '' } }, sb.env, base);
+  };
   put(RB('staging-a'));
   read();
   const base = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: KL, CC_ANCHOR_KRONICLE_DATA_DIR: data, CC_ANCHOR_PUSH_TIMEOUT: '30', ...extraEnv };
@@ -49,7 +55,7 @@ function world(extraEnv = {}) {
   const decision = (r) => r.json?.hookSpecificOutput?.permissionDecision ?? null;
   const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason ?? '';
   const log = () => (fs.existsSync(path.join(sb.run, 'log')) ? fs.readFileSync(path.join(sb.run, 'log'), 'utf8') : '');
-  return { sb, data, kl, put, read, start, post, mcp, pre, spawn, ctx, decision, reason, log };
+  return { sb, data, kl, put, read, reread, start, post, mcp, pre, spawn, ctx, decision, reason, log };
 }
 
 test('pending gate: a delivered change stays a deny until the agent re-reads the current version — no acknowledgement step', opts, () => {
@@ -65,11 +71,11 @@ test('pending gate: a delivered change stays a deny until the agent re-reads the
     assert.match(r, /1 kronicle-lite change\(s\) you \(actor local-agent\) relied on are not re-read at their current version/);
     assert.match(r, /- runbook › Runbook › Deploy \(seq \d+, superseded\/behavioral; you read it at seq \d+\): read "Deploy with \.\/bin\/deploy --target staging-a\." → now "Deploy with \.\/bin\/deploy --target staging-b\."; diff: .*\[-staging-a\.-\]\{\+staging-b\.\+\}/);
     assert.match(r, /recall it again or read kronicle:\/\/docs\/runbook/, "kronicle-lite's own resolve hint");
-    assert.match(r, /acknowledging a change, retrying, or reading as another actor does not/);
+    assert.match(r, /acknowledging a change, retrying, reading as another actor, or another agent of this session re-reading it does not/);
     assert.match(r, /only read-only Bash commands run \(cat, less, head, tail, ls, grep, rg, find/);
     assert.equal(w.pre('cat docs/runbook.md && git log --oneline -3').stdout, '', 'read-only calls run while pending');
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'still pending on a retry');
-    w.read(); // recall through the MCP server = a read by local-agent
+    w.reread(); // the agent's own re-read (kronicle-lite get) = a read by local-agent
     assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 're-reading the current version cleared it');
     assert.match(w.log(), /pulse: denied .*1 pending for local-agent/);
   } finally { w.sb.cleanup(); }
@@ -85,7 +91,7 @@ test('pending gate: two changes since the read show the latest version; pulse_mo
     assert.equal(w.decision(r), null, 'warn mode never denies');
     assert.match(w.ctx(r), /pulse \(warn\): `git push origin main` is about to run, but 1 kronicle-lite change\(s\)/);
     assert.match(w.ctx(r), /now "Deploy with \.\/bin\/deploy --target staging-c\."/);
-    w.read();
+    w.reread();
     assert.doesNotMatch(w.ctx(w.pre('git push origin main')), /not re-read/);
   } finally { w.sb.cleanup(); }
 });
@@ -101,10 +107,10 @@ test('pending gate per agent: the union of the configured actor and every actor_
     const d = w.pre('./bin/deploy --target staging-a', 'agent-s1');
     assert.equal(w.decision(d), 'deny', 's1 read v1 as sub-s1 (and the server actor read it too)');
     assert.match(w.reason(d), /2 kronicle-lite change\(s\) you relied on \(as actors local-agent, sub-s1\)/);
-    w.read('sub-s1');
+    w.reread('sub-s1', 'agent-s1');
     assert.match(w.reason(w.pre('./bin/deploy --target staging-b', 'agent-s1')), /1 kronicle-lite change\(s\) you \(actor local-agent\) relied on/, 's1 re-read as sub-s1: the configured actor is still pending');
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'the parent (local-agent) has not re-read: still denied');
-    w.read();
+    w.reread();
     assert.equal(w.pre('./bin/deploy --target staging-b', 'agent-s1').stdout, '', 'both re-read: s1 clear');
     assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'parent clear');
     // H2-03c: passing another actor_id to a non-read tool after reading as the server actor
@@ -151,7 +157,7 @@ test('push reminder: still pending push_reminder_after tool calls later, no worl
     assert.deepEqual(rem, [false, false, true, false, false, false], 'one reminder, on the 3rd call while pending');
     assert.equal(outs.filter((o) => /changed while you were working/.test(o)).length, 1, 'never re-pushed');
     // a new pending episode after a re-read gets its own reminder; a world-changing attempt suppresses it
-    w.read();
+    w.reread();
     w.post('clear');
     w.put(RB('staging-c'));
     w.post('delivered');
