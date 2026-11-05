@@ -60,6 +60,12 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
   }
   const start = (s = sid, source = 'startup') => hook('session-start.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SessionStart', source }, sb.env, base);
   const post = (command = 'make', s = sid, extra = {}, agent = null) => hook('post-tool-use.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PostToolUse', ...(agent ? { agent_id: agent, agent_type: 'general-purpose' } : {}), tool_name: 'Bash', tool_input: { command }, tool_response: {} }, sb.env, { ...base, ...extra });
+  // 0.5.2 (L2-05): a re-read counts for the agent whose own tool result shows it
+  const reread = (actor = 'local-agent') => {
+    const r = read(actor);
+    assert.equal(r.status, 0);
+    hook('post-tool-use.sh', { session_id: sid, cwd: sb.proj, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: `kronicle-lite get runbook --actor ${actor}` }, tool_response: { stdout: r.stdout, stderr: '' } }, sb.env, base);
+  };
   const spawn = (agent, s = sid) => hook('subagent-start.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SubagentStart', agent_id: agent, agent_type: 'general-purpose' }, sb.env, base);
   const stopAgent = (agent, s = sid) => hook('subagent-stop.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'SubagentStop', stop_hook_active: false, agent_id: agent, agent_type: 'general-purpose', last_assistant_message: 'done' }, sb.env, base);
   const pre = (command, s = sid, extra = {}, agent = null) => hook('pulse.sh', { session_id: s, cwd: sb.proj, hook_event_name: 'PreToolUse', ...(agent ? { agent_id: agent, agent_type: 'general-purpose' } : {}), tool_name: 'Bash', tool_input: { command } }, sb.env, { ...base, ...extra });
@@ -67,7 +73,7 @@ function world({ sid = 'sess-kl-0001', env: extraEnv = {}, mcpJson = false } = {
   const decision = (r) => r.json?.hookSpecificOutput?.permissionDecision ?? null;
   const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason ?? '';
   const log = () => (fs.existsSync(path.join(sb.run, 'log')) ? fs.readFileSync(path.join(sb.run, 'log'), 'utf8') : '');
-  return { sb, data, put, read, start, post, pre, spawn, stopAgent, ctx, decision, reason, log };
+  return { sb, data, put, read, reread, start, post, pre, spawn, stopAgent, ctx, decision, reason, log };
 }
 
 test('push (real CLI): a retraction that lands during a tool call is injected after it — relied on / now / diff — exactly once', opts, () => {
@@ -129,7 +135,7 @@ test('pulse (real CLI): a world-changing command issued straight after the push 
     assert.match(w.reason(d), /Re-read/);
     if (CAP) {
       assert.equal(w.decision(w.pre('./bin/deploy --target staging-b')), 'deny', 'pending: being told is not reconciling');
-      w.read();
+      w.reread();
       assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'pending: re-reading the current version clears it');
     } else {
       assert.equal(w.pre('./bin/deploy --target staging-b').stdout, '', 'the deny delivered it: re-running is allowed');
@@ -140,7 +146,7 @@ test('pulse (real CLI): a world-changing command issued straight after the push 
     w.post('cat runbook.md');
     if (CAP) {
       assert.equal(w.decision(w.pre('./bin/deploy --target staging-c')), 'deny', 'pending: a tool call is not a re-read');
-      w.read();
+      w.reread();
     }
     assert.equal(w.pre('./bin/deploy --target staging-c').stdout, '', 'a tool call in between (legacy) / a re-read (pending) = allowed');
     assert.equal(w.pre('./bin/notify --channel ops').stdout, '', 'nothing pending: any command runs');
@@ -157,7 +163,7 @@ test('pulse (real CLI): a change that lands after the last tool call is caught b
     assert.equal(w.decision(d), 'deny');
     assert.match(w.reason(d), /staging-a\.-\]\{\+prod-b/);
     assert.equal(w.ctx(w.post('cat runbook')), null, 'the deny advanced the cursor: no duplicate push');
-    if (CAP) { assert.equal(w.decision(w.pre('./bin/deploy --target prod-b')), 'deny'); w.read(); }
+    if (CAP) { assert.equal(w.decision(w.pre('./bin/deploy --target prod-b')), 'deny'); w.reread(); }
     assert.equal(w.pre('./bin/deploy --target prod-b').stdout, '');
   } finally { w.sb.cleanup(); }
 });

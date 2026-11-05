@@ -396,6 +396,17 @@ Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itse
   naming another actor never clears what one of them has pending. The
   parent is not gated on a subagent's private actor. A stopped subagent's
   actors are kept, so a resumed one (same `agent_id`) is gated on them.
+- **Per agent, not just per actor (0.5.2).** The agents of one session
+  usually share the server's actor, so kronicle-lite's count clears when
+  any one of them re-reads. cc-anchor also keeps a ledger per `agent_id`
+  (`scripts/owed.jq`): every agent owes each pending change until **its own**
+  tool result shows the current version (a recall hit or `get --block` with
+  the current block, `kronicle://docs/<slug>` or `kronicle-lite get <slug>`
+  holding the current text). A blocking retraction of a block or document
+  an agent was seen reading is owed by that agent even when `pending` never
+  lists it (another agent wrote it as the shared actor). A subagent first
+  seen alive inherits what the session's agents still owe; a stopped one's
+  ledger is parked and given back if the same `agent_id` resumes.
 - With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the 0.4.0 rule
   decides when the gate is on: a blocking retraction that has not reached
   the agent yet (the deny delivers it; the retry runs).

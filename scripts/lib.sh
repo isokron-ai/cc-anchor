@@ -1372,14 +1372,14 @@ cc_kl_ledger_feed() {
     [[ -n "$h" ]] || continue
     if [[ -n "$only" ]]; then
       ap="${h/.stopped\//.}.actors"
-      [[ -s "$ap" ]] && grep -Fxq -- "$only" "$ap" 2>/dev/null || continue
+      if [[ ! -s "$ap" ]] || ! grep -Fxq -- "$only" "$ap" 2>/dev/null; then continue; fi
     fi
     # Steps only matter to a ledger that owes something or was seen reading.
     (( haspend )) || [[ -s "$h.owed" || -s "$h.reads" ]] || continue
     prev=""; [[ -s "$h.fed" ]] && prev="$(< "$h.fed")"
     [[ "$prev" == "$feed" ]] && continue
     out="$(jq -nr --arg mode reg --arg feed "$feed" --arg owed "$(cc_kl_slurp "$h.owed")" \
-            --arg done "$(cc_kl_slurp "$h.done")" --arg reads "$(cc_kl_slurp "$h.reads")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || continue
+            --arg "done" "$(cc_kl_slurp "$h.done")" --arg reads "$(cc_kl_slurp "$h.reads")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || continue
     n0=0; [[ -s "$h.owed" ]] && n0="$(grep -c . "$h.owed" 2>/dev/null)"
     if [[ -n "$out" ]]; then printf '%s\n' "$out" > "$h.owed.$$" 2>/dev/null && mv -f "$h.owed.$$" "$h.owed"
     else rm -f "$h.owed" 2>/dev/null; fi
@@ -1400,7 +1400,7 @@ cc_kl_inherit() {
   mkdir -p "$CC_RUN/push" 2>/dev/null || return 0
   local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" h x owed="" reads="" out n
   cc_kl_lock
-  for x in owed done reads; do
+  for x in owed "done" reads; do
     if [[ -e "$P.$x" ]]; then cat "$P.$x" >> "$CC_KL_B.$x" 2>/dev/null; rm -f "$P.$x" 2>/dev/null; fi
   done
   rm -f "$P.fed" 2>/dev/null
@@ -1410,7 +1410,7 @@ cc_kl_inherit() {
     [[ -s "$h.reads" ]] && reads="${reads}$(< "$h.reads")"$'\n'
   done < <(cc_kl_holders)
   if [[ -n "$owed" || -s "$CC_KL_B.owed" ]]; then
-    out="$(jq -nr --arg mode merge --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")"$'\n'"$owed" --arg done "$(cc_kl_slurp "$CC_KL_B.done")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || out=""
+    out="$(jq -nr --arg mode merge --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")"$'\n'"$owed" --arg "done" "$(cc_kl_slurp "$CC_KL_B.done")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || out=""
     if [[ -n "$out" ]]; then
       printf '%s\n' "$out" > "$CC_KL_B.owed.$$" 2>/dev/null && mv -f "$CC_KL_B.owed.$$" "$CC_KL_B.owed"
       n="$(grep -c . <<<"$out")"
@@ -1433,7 +1433,7 @@ cc_kl_ledger_park() {
   local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" x
   mkdir -p "$CC_KL_S.stopped" 2>/dev/null || return 0
   cc_kl_lock
-  for x in owed done reads; do
+  for x in owed "done" reads; do
     if [[ -e "$CC_KL_B.$x" ]]; then cat "$CC_KL_B.$x" >> "$P.$x" 2>/dev/null; rm -f "$CC_KL_B.$x" 2>/dev/null; fi
     [[ -e "$P.$x" ]] || : > "$P.$x" 2>/dev/null
   done
