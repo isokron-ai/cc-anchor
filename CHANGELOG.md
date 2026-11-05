@@ -6,6 +6,27 @@ SemVer.
 
 ## [Unreleased]
 
+### Added
+- **Audit telemetry (opt-in).** `scripts/telemetry.sh` + `scripts/telemetry.jq`
+  on `Stop` / `SubagentStop` / `PreCompact` / `SessionEnd` (new hook) record
+  provider-reported usage per API response and per turn, tool result sizes
+  and latency, and compactions from the transcript, incrementally, as JSONL
+  (`cca.telemetry/1`). Tool-response tokens are a separate bytes/4 estimate,
+  never added to the provider's counts. No content is logged; tool names are
+  redacted. `--scan <transcript>` gives the same records offline; `--kronicle`
+  maps them to draft kronicle-lite audit events (`call_measured`, `turn_usage`).
+- **Observer-effect switch** `CC_ANCHOR_OBSERVER=off|telemetry|telemetry+anchors`:
+  `off` and `telemetry` make every other cc-anchor hook a no-op;
+  `off` also wins over `CC_ANCHOR_TELEMETRY=1`.
+- Telemetry is bounded and exactly-once: reads at most a 4 MiB window per jq
+  pass and 5 s per run (resumed next run), and moves the offset atomically
+  after the records are written. A seen-set of message ids, tool_use ids and
+  compactions stops a response straddling two windows, or a truncated or
+  rewritten transcript, from being counted twice. No transcript copies; one
+  run at a time (a live lock is never broken). Invalid usage counts are
+  flagged (`invalid_usage`), never coerced to 0. The overhead record is
+  written only on runs that flushed.
+
 ### Fixed
 - **Pending gate shared across subagents (L2-05, hardening-live).** One
   agent's re-read cleared the gate for every agent of the session (they

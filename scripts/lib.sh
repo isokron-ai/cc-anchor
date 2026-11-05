@@ -42,6 +42,17 @@ export PATH="${PATH:+${PATH}:}/opt/homebrew/bin:/usr/local/bin"
 export TZ=UTC
 
 CC_LIB_DIR="${BASH_SOURCE[0]%/*}"; [[ "$CC_LIB_DIR" == "${BASH_SOURCE[0]}" ]] && CC_LIB_DIR=.
+
+# Observer-effect arms for audits (CC_ANCHOR_OBSERVER; environment only, it
+# is decided before any config file is found): `off` and `telemetry` make
+# every cc-anchor hook a no-op here — no card, push, gate or guard — so a
+# benchmark can separate cc-anchor's own effect from the server's.
+# telemetry.sh still records under `telemetry`; the statusline and the CLI
+# are not hooks and keep working, and the worktree hooks (which must print a
+# path) run as usual. `telemetry+anchors` / unset: as usual.
+case "${CC_ANCHOR_OBSERVER:-}" in
+  off|telemetry) case "${0##*/}" in telemetry.sh|statusline.sh|worktree-*.sh) ;; *.sh) exit 0;; esac;;
+esac
 CC_RENDER_JQ="$CC_LIB_DIR/render.jq"
 CC_MARKER='<!-- cc-anchor:trail -->'
 CC_VERSION_LINE='<!-- cc-anchor v1 — edit the lines above the trail marker by hand or with /cc-anchor:anchor. Everything below the marker is regenerated. -->'
