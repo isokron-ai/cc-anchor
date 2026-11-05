@@ -563,6 +563,82 @@ kronicle-lite cursor, head seq, mtime stamp, pending retractions),
 `bashguard/` (claimed-path cache, per-session Bash stamps), `log` and
 `once/` (rate-limit latches). All regenerable; keep the directory in `.gitignore`.
 
+## Audit telemetry (opt-in)
+
+Benchmark accounting for MCP audits, at the model boundary: what each turn
+cost as the provider reported it, and when context was compacted. Off unless
+you set `CC_ANCHOR_OBSERVER` or `CC_ANCHOR_TELEMETRY=1`.
+
+Hook payloads carry no token counts. The transcript does: each assistant
+entry holds `message.usage` exactly as the API returned it. `scripts/telemetry.sh`
+runs on `Stop`, `SubagentStop`, `PreCompact` and `SessionEnd`, reads only the
+transcript lines written since its last run (a byte offset per transcript
+file; a half-written last line waits), and appends JSONL records
+(`scripts/telemetry.jq`, schema `cca.telemetry/1`):
+
+| `ev` | One per | Fields |
+| :- | :- | :- |
+| `model_call` | API response (content-block duplicates counted once; `<synthetic>` dropped) | `request_id`, `message_id`, `model`, `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens` |
+| `turn_usage` | flush (`closed_by`: the hook event) | the sums of the above, `api_calls`, `models`, `tool_calls`, `tool_result_bytes`, `tool_response_tokens_est`, `compactions` |
+| `tool_call` | tool result | `tool`, `tool_use_id`, `input_bytes`, `result_bytes`, `images`, `is_error`, `latency_ms`, `tool_response_tokens_est`, `est_method: "bytes/4"` |
+| `compaction` | `compact_boundary` | `trigger`, `pre_tokens`, `post_tokens`, `duration_ms` |
+| `compact_start` | `PreCompact` | `trigger` |
+| `telemetry_overhead` | hook run | `hook`, `hook_ms` (this hook's own time) |
+
+Each API response is counted once in one flush, so the sum of the `turn_usage`
+records equals the sum of the `model_call` records. Token counts are never
+derived or added to. `tool_response_tokens_est` is a bytes/4 estimate kept in
+its own field. The provider's input and cache counts already include tool
+results, so adding the two would double-count. `latency_ms` is the
+`tool_result` timestamp minus the `tool_use` timestamp in the transcript.
+It includes hook time, and is null when the pair is split across two flushes.
+Subagents are recorded with their `agent_id`, from `agent_transcript_path` on
+`SubagentStop` and from `<session>/subagents/agent-*.jsonl` on `SessionEnd`.
+
+**Observer-effect switch** (`CC_ANCHOR_OBSERVER`, environment only):
+
+| Value | Telemetry | Card, push, gate, guards |
+| :- | :- | :- |
+| unset | only with `CC_ANCHOR_TELEMETRY=1` | on, as usual |
+| `off` | no | no-op (every hook exits at once) |
+| `telemetry` | yes | no-op |
+| `telemetry+anchors` | yes | on |
+
+For a true zero-observer arm, run with `off` (or without the plugin) and
+measure afterwards from the transcript. This gives the same records with no
+hook involved:
+
+```bash
+bash scripts/telemetry.sh --scan ~/.claude/projects/<proj>/<session>.jsonl --subagents [--kronicle] > usage.jsonl
+```
+
+`--kronicle` (or `CC_ANCHOR_TELEMETRY_FORMAT=kronicle`) writes draft
+kronicle-lite audit events instead (`schema: "kronicle.audit/0-draft"`,
+`event_type` `call_measured` / `turn_usage` / `model_call` / `compaction`,
+`boundary: "model"`, `fingerprint: null`, the fields above under `payload`).
+This is a thin mapping, to be aligned once kronicle-lite's audit event types
+land.
+
+**Privacy.** No content is copied: only names, ids, counts and timestamps.
+Tool names, the one free-text field, are passed through secret redaction
+(API keys, GitHub/Slack tokens, AWS keys, bearer tokens, JWTs).
+
+**Overhead.** Nothing runs on `PreToolUse`/`PostToolUse`: tool sizes and
+latency come from the transcript. Measured on the dev sandbox (Linux, bash 5,
+jq 1.7):
+- disabled: ~2 ms per Stop-class event (bash start + one `case`);
+- enabled with nothing new: ~20 ms;
+- enabled, flushing a 23-API-call / 165 KB turn: ~40–55 ms (`hook_ms` p50 37 ms over 20 runs).
+
+| Variable | Default | Meaning |
+| :- | :- | :- |
+| `CC_ANCHOR_OBSERVER` | — | `off` / `telemetry` / `telemetry+anchors` (above) |
+| `CC_ANCHOR_TELEMETRY` | `0` | `1` records telemetry with cc-anchor otherwise unchanged |
+| `CC_ANCHOR_TELEMETRY_FILE` | `.claude/cc-anchor/telemetry.jsonl` | JSONL output path |
+| `CC_ANCHOR_TELEMETRY_FORMAT` | `cca` | `kronicle` for the draft kronicle-lite mapping |
+
+Claude Code only: the Cursor adapter does not install it.
+
 ## Cursor
 
 Cursor's hooks (`.cursor/hooks.json`, `version: 1`) speak a different dialect:
