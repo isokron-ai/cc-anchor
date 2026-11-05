@@ -153,8 +153,12 @@ for spec in ${files[@]+"${files[@]}"}; do  # bash 3.2 + set -u: an empty array i
     c="$tmpd/chunk"
     tail -c +"$((off + 1))" "$f" 2>/dev/null | head -c "$win" > "$c" 2>/dev/null || break
     len="$(fsize "$c")"; [[ -n "$len" && "$len" -gt 0 ]] || break
-    if [[ "$(tail -c 1 "$c" | od -An -c)" == *'\n'* ]]; then take=$len
-    else part="$(tail -n 1 "$c" | wc -c)"; take=$(( len - ${part//[^0-9]/} )); fi
+    # complete lines only: `wc -l` counts newlines and `head -n K | wc -c` is
+    # their bytes — the same on GNU, BSD and uutils (Ubuntu 26.04), unlike
+    # `tail -n 1` / `od` on a chunk without a final newline.
+    nl="$(wc -l < "$c")"; nl="${nl//[^0-9]/}"
+    if (( nl == 0 )); then take=0
+    else take="$(head -n "$nl" "$c" | wc -c)"; take="${take//[^0-9]/}"; fi
     nhl=$hl; (( nhl < 4096 )) && nhl=$(( off + take < 4096 ? off + take : 4096 ))
     if (( take == 0 )); then
       # No newline in a whole window: the line is still being written (end
@@ -163,7 +167,7 @@ for spec in ${files[@]+"${files[@]}"}; do  # bash 3.2 + set -u: an empty array i
       q=$(( off + len )); nl_hit=0
       while (( q < size )) && left; do
         tail -c +"$((q + 1))" "$f" 2>/dev/null | head -c "$win" > "$c" 2>/dev/null || break
-        nls="$(tr -dc '\n' < "$c" | wc -c)"
+        nls="$(wc -l < "$c")"
         if (( ${nls//[^0-9]/} > 0 )); then q=$(( q + $(head -n 1 "$c" | wc -c) )); nl_hit=1; break; fi
         q=$(( q + $(fsize "$c") ))
       done
