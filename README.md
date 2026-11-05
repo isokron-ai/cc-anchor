@@ -407,6 +407,42 @@ Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itse
   lists it (another agent wrote it as the shared actor). A subagent first
   seen alive inherits what the session's agents still owe; a stopped one's
   ledger is parked and given back if the same `agent_id` resumes.
+- **What counts as a re-read (0.5.3).** Only a tool result produced by
+  kronicle-lite counts. That means one of:
+  - a kronicle-lite MCP tool (`mcp__…kronicle…__*`) or a `kronicle://`
+    resource read, showing the current block (same `content_hash` when
+    both sides carry one) or the document;
+  - one plain, successful `kronicle-lite get <slug>` or `get --block <id>`
+    in Bash: no pipe, redirect, chaining, substitution or quoting; no
+    stderr; stdout present. The whole output must hold the current text,
+    or no longer hold a removed one. kronicle-lite must also confirm the
+    read (read-only `pending --actor`); if it can't be asked, nothing
+    clears.
+
+  `echo …`, `grep "kronicle-lite get runbook" …`, `… | head` and a get that
+  errors clear nothing. Limit: with a shared actor, kronicle-lite's
+  confirmation cannot say *which* agent read. Against that, the
+  plain-command and output checks are what count.
+- **The ledger is cc-anchor's, not the agent's (0.5.3).**
+  - Write/Edit/MultiEdit/NotebookEdit inside the run dir
+    (`.claude/cc-anchor/`, compared physically) are denied, always.
+  - A Bash call that is not read-only and names the run dir is denied in
+    every `pulse_mode`, pending or not.
+  - Each `.owed` has an `.owed.sum` (lines + cksum). A ledger truncated,
+    edited or deleted outside cc-anchor, or holding a line that is not an
+    item, fails closed.
+  - Programs the agent runs can still write files the hooks never see.
+    These guards stop the direct routes.
+- **Locking (0.5.3).** The ledger lock holds its owner's pid. It is taken
+  over only from a dead (or zombie) owner, never broken by age. After 3 s
+  the update is skipped and the gate fails closed: a skipped feed is queued
+  and the gate denies until it applies; a subagent whose inheritance could
+  not be written is denied until it is. flock(1) is not used because macOS
+  has none.
+- **No jq (0.5.3).** Where this project's push state shows kronicle-lite in
+  use, the pulse fails closed: every Bash call is denied, with a message
+  saying jq is missing. Without kronicle-lite there is nothing to gate, and
+  calls run.
 - With kronicle-lite ≤ 0.7.0 (no `pending` in the briefing) the 0.4.0 rule
   decides when the gate is on: a blocking retraction that has not reached
   the agent yet (the deny delivers it; the retry runs).

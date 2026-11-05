@@ -37,20 +37,11 @@
 #          newer change of the same lineage replaces the older one).
 #   clear  input: a PostToolUse payload; $owed (raw). Tab-tagged lines:
 #          "O\t<item>" still owed, "C\t<key>" re-read (cleared),
+#          "B\t<key>\x1f<actor>\x1f<read block>\x1f<item>" re-read by a plain
+#          `kronicle-lite get` — cleared only once kronicle-lite confirms it,
 #          "F\t<block id>" the version it had read (no longer relied on),
 #          "R\t<block id | doc:slug>" read: what this result shows it read.
-#          Evidence is content the agent was shown, never a count:
-#            - a block (recall hit, `get --block --json`) whose block_id is
-#              the current version, or a live block of the document whose
-#              text holds the current text;
-#            - a whole-document read (ReadMcpResourceTool
-#              kronicle://docs/<slug>, Bash `kronicle-lite get <slug>`)
-#              holding the current text, or, for a removal, no longer holding
-#              the removed text;
-#            - the agent's own write (put_document / supersede_block /
-#              tombstone_block result naming the current block).
-#          A tool result that only TALKS about the change (the push,
-#          get_system_state, `pending`) shows no block content: no evidence.
+#          Evidence must come from kronicle-lite itself (see the mode).
 #   merge  -n; $owed (raw, possibly several ledgers concatenated) and $done:
 #          the owed lines deduplicated by key, minus keys in $done (a
 #          subagent inheriting what the session's agents still owe).
@@ -94,7 +85,8 @@ def pitem:
   | select(.doc_slug != null and ($cur != null or $rd != null))
   | { k: (if $cur != null then "c:\($cur)" else "t:\($rd):\(.seq // "?")" end),
       slug: .doc_slug, seq: .seq, cur: $cur, tb: (if $cur == null then $rd else null end), rd: $rd,
-      new: (.new_text | mkey), old: (.old_text | mkey), line: pline };
+      new: (.new_text | mkey), old: (.old_text | mkey), line: pline }
+    + (if (.current.content_hash // null) != null then { ch: .current.content_hash } else {} end);
 
 def ritem:
   { k: (if .successor_block_id != null then "c:\(.successor_block_id)" else "t:\(.block_id):\(.seq // "?")" end),
@@ -146,49 +138,101 @@ elif $mode == "reg" then
   | .[] | tojson
 
 elif $mode == "clear" then
+  # Evidence is a tool result PRODUCED BY kronicle-lite, never text that
+  # merely looks like one (0.5.3, PR #6 review):
+  #   * a kronicle-lite MCP tool (mcp__<…kronicle…>__*) or a kronicle://
+  #     resource read: block objects in its result (block_id, content and,
+  #     when both sides have one, the same content_hash);
+  #   * a Bash call that is ONE plain `kronicle-lite get <slug>` /
+  #     `get --block <id>` (no pipe, redirect, chaining, substitution or
+  #     quoting), that succeeded (no stderr, not interrupted, stdout
+  #     present): its stdout is the whole document (or block). Shell
+  #     output alone proves nothing, so these come out as "B" lines: lib.sh
+  #     asks kronicle-lite (`pending --actor`, read-only) whether it
+  #     recorded that read at the current version (content hash), and only
+  #     then clears them.
+  # echo / grep / `| head` / an erroring get / a command that only mentions
+  # the document show nothing.
   def expand: if type == "string" and test("^\\s*[\\[{]") then (fromjson? // .) else . end;
   def pct: [scan("%[0-9A-Fa-f]{2}|.")] | map(if startswith("%") and length == 3 then ([.[1:] | ascii_downcase | explode[] | if . >= 97 then . - 87 else . - 48 end] | .[0] * 16 + .[1] | [.] | implode) else . end) | join("");
   ($ARGS.named.owed // "" | items_of) as $items
-  | [ .tool_response | .. | expand | .. | expand ] as $all
+  | (.tool_name // "" | tostring) as $tool
+  | ($tool | test("^mcp__.*kronicle.*__"; "i")) as $klmcp
+  | (($tool | test("ReadMcpResource|read_resource"; "i")) and ((.tool_input.uri // "") | tostring | startswith("kronicle://"))) as $klres
+  | [ if $klmcp or $klres then (.tool_response | .. | expand | .. | expand) else empty end ] as $all
   | [ $all[] | objects | select((.block_id | type) == "string") ] as $objs
   | [ $all[] | strings ] as $strs
-  | ($strs | map(norm) | join(" \n ")) as $text
-  | (.tool_name // "") as $tool
-  | ($tool | test("__(put_document|supersede_block|tombstone_block)$")) as $write
-  # a whole-document read: the MCP resource, or `kronicle-lite get <slug>` in Bash
-  | ( if ($tool | test("ReadMcpResource|read_resource"; "i")) then
-        ((.tool_input.uri // "") | tostring | capture("^kronicle://docs/(?<s>[^?#]+)")? | .s | pct) // null
-      elif $tool == "Bash" then
-        ((.tool_input.command // "") | tostring
-         | [ scan("(?:kronicle-lite|cli\\.m?js)[\"']?\\s+get((?:\\s+[^\\s|;&<>()]+)*)") | .[0] ]
-         | map( [ splits("\\s+") | select(length > 0) | gsub("^[\"']|[\"']$"; "") ]
-                | if any(.[]; . == "--block" or startswith("--block=")) then null
-                  else (reduce .[] as $t ({skip: false, slug: null};
-                          if .slug != null then .
-                          elif .skip then .skip = false
-                          elif ($t | IN("--actor", "--data-dir", "--cwd")) then .skip = true
-                          elif ($t | startswith("-")) then .
-                          else .slug = $t end) | .slug) end )
-         | map(select(. != null)) | first) // null
-      else null end ) as $doc
-  | ($doc != null and ($text | length) > 0) as $docread
-  | def seen($id): any($objs[]; .block_id == $id and ((.content | type) == "string") and ((.status // "live") != "superseded"));
+  | ($klmcp and ($tool | test("__(put_document|supersede_block|tombstone_block)$"))) as $write
+  | ( if $klres then ((.tool_input.uri // "") | tostring | capture("^kronicle://docs/(?<s>[^?#]+)")? | .s | pct) // null else null end ) as $resdoc
+  | (if $klres then ($strs | map(norm) | join(" \n ")) else "" end) as $restext
+  # one plain, successful `kronicle-lite get` in Bash
+  | (.tool_input.command // "" | tostring) as $cmd
+  | ( if $tool == "Bash"
+         and ($cmd | test("^\\s*(?:kronicle-lite|npx\\s+(?:-y\\s+)?kronicle-lite(?:@[A-Za-z0-9._-]+)?|node\\s+[A-Za-z0-9._/@~-]*cli\\.m?js)\\s+get(?:\\s+[A-Za-z0-9._:/@=,~+-]+)+\\s*$"))
+         and ((.tool_response | type) == "object")
+         and ((.tool_response.stderr // "") == "") and (.tool_response.interrupted != true)
+         and ((.tool_response.stdout | type) == "string") and ((.tool_response.stdout | length) > 0)
+      then
+        ([ $cmd | splits("\\s+") | select(length > 0) ] | .[(index("get") + 1):]) as $a
+        | (reduce range(0; $a | length) as $i ({skip: false, slug: null, block: null, json: false, actor: null};
+             $a[$i] as $t
+             | if .skip then .skip = false
+               elif $t == "--block" then .block = ($a[$i + 1] // null) | .skip = true
+               elif ($t | startswith("--block=")) then .block = ($t | ltrimstr("--block="))
+               elif $t == "--actor" then .actor = ($a[$i + 1] // null) | .skip = true
+               elif ($t | startswith("--actor=")) then .actor = ($t | ltrimstr("--actor="))
+               elif ($t | IN("--data-dir", "--cwd")) then .skip = true
+               elif $t == "--json" then .json = true
+               elif ($t | startswith("-")) then .
+               elif .slug == null then .slug = $t
+               else . end)) as $g
+        | .tool_response.stdout as $out
+        | (if $g.json then ($out | fromjson? // null) else null end) as $j
+        | if $g.block != null then
+            { block: $g.block, actor: $g.actor,
+              text: (if $g.json then ($j.content // "" | tostring) else $out end | norm),
+              hash: (if $g.json then ($j.content_hash // null) else null end),
+              id: (if $g.json then ($j.block_id // null) else $g.block end) }
+          elif $g.slug != null then
+            { slug: $g.slug, actor: $g.actor, text: (if $g.json then ($j.markdown // "" | tostring) else $out end | norm) }
+          else null end
+      else null end ) as $get
+  | def hashok($o; $ch): ($ch == null) or (($o.content_hash // null) == null) or ($o.content_hash == $ch);
+    def seen($id; $ch): any($objs[]; .block_id == $id and ((.content | type) == "string") and ((.status // "live") != "superseded") and hashok(.; $ch));
     def holds($slug; $t): any($objs[]; .doc_slug == $slug and ((.content | type) == "string") and ((.status // "live") == "live") and (.content | norm | contains($t)));
-    def reread:
-      .new as $new | .old as $old
+    # MCP / resource evidence: cleared at once
+    def direct:
+      .new as $new | .old as $old | (.ch // null) as $ch
       | if .cur != null then
-        seen(.cur)
-        or ($write and (.cur | IN($strs[])))
-        or ($new != "" and (($docread and $doc == .slug and ($text | contains($new))) or holds(.slug; $new)))
-      else
-        ($docread and $doc == .slug and $old != "" and (($text | contains($old)) | not))
-        or (.tb as $tb | $tb != null and any($objs[]; .block_id == $tb and .status == "tombstoned"))
-        or ($write and .tb != null and (.tb | IN($strs[])))
-      end;
-  # one tagged line each: O <owed item>, C <cleared key>, F <block no longer relied on>, R <read>
-  ( $items[] | if reread then "C\t\(.k)", (.rd // empty | "F\t\(.)") else "O\t\(tojson)" end ),
+          seen(.cur; $ch)
+          or ($write and (.cur | IN($strs[])))
+          or ($new != "" and (($resdoc == .slug and ($restext | contains($new))) or holds(.slug; $new)))
+        else
+          ($resdoc == .slug and $restext != "" and $old != "" and (($restext | contains($old)) | not))
+          or (.tb as $tb | $tb != null and any($objs[]; .block_id == $tb and .status == "tombstoned"))
+          or ($write and .tb != null and (.tb | IN($strs[])))
+        end;
+    # a plain get in Bash: cleared only once kronicle-lite confirms the read
+    def viaget:
+      $get != null and (
+        .new as $new | .old as $old | (.ch // null) as $ch
+        | if $get.block != null then
+            .cur != null and $get.block == .cur and ($get.id == .cur)
+            and ($get.hash == null or $ch == null or $get.hash == $ch)
+            and $new != "" and ($get.text | contains($new))
+          elif $get.slug == .slug then
+            if .cur != null then $new != "" and ($get.text | contains($new))
+            else $old != "" and (($get.text | contains($old)) | not) end
+          else false end );
+  # one tagged line each: O <owed item>, C <cleared key>, F <block no longer
+  # relied on>, R <read>, B <key>␟<actor>␟<read block>␟<item> (\x1f-separated;
+  # needs kronicle-lite's confirmation)
+  ( $items[] | if direct then "C\t\(.k)", (.rd // empty | "F\t\(.)")
+               elif viaget then "B\t" + ([.k, ($get.actor // ""), (.rd // ""), tojson] | join("\u001f"))
+               else "O\t\(tojson)" end ),
   ( [ $objs[] | select((.content | type) == "string") | .block_id ]
-    + (if $docread then ["doc:" + $doc] else [] end)
+    + (if $resdoc != null and $restext != "" then ["doc:" + $resdoc] else [] end)
+    + (if $get != null and $get.slug != null then ["doc:" + $get.slug] elif $get != null then [$get.block] else [] end)
     + (if $write then [ $strs[] | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) ] else [] end)
     | unique[] | "R\t\(.)" )
 

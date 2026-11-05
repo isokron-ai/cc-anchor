@@ -1228,6 +1228,7 @@ cc_kl_push() {
   # longer "unacted on".
   [[ -e "$CC_KL_B.pending" ]] && rm -f "$CC_KL_B.pending"
   cc_kl_fetch || true
+  cc_kl_ledger_retry || true
   # 0.5.2 (L2-05): this agent's own re-reads clear its ledger.
   cc_kl_observe "$payload"
   # Top priority: a store that says it is corrupt (once per distinct problem).
@@ -1326,27 +1327,63 @@ $(cc_kl_actor_note)"
 
 CC_KL_LOCKED=0
 
+# 0.5.3: the lock is a directory holding its owner's pid. It is taken over
+# only when that owner is gone (or a zombie); a live owner's lock is never
+# broken, however old (12 parallel agents broke a live lock by age in 0.5.2
+# and then wrote unlocked). After 3 s it gives up: the caller skips its
+# update and fails closed (cc_kl_ledger_feed queues it, the gate denies
+# until it is applied). flock(1) is not used: macOS has none.
+cc_kl_alive() { [[ "$1" =~ ^[0-9]+$ ]] && kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != *Z* ]]; }
 cc_kl_lock() {
-  local l="$CC_KL_S.lock" i=0 t now
+  local l="$CC_KL_S.lock" i=0 owner
   while ! mkdir "$l" 2>/dev/null; do
     i=$((i + 1))
-    if (( i % 25 == 0 )); then
-      t=""; [[ -s "$l/at" ]] && IFS= read -r t < "$l/at"
-      cc_epoch_now_var now
-      if { [[ "$t" =~ ^[0-9]+$ ]] && (( now - t > 5 )); } || { [[ -z "$t" ]] && (( i >= 100 )); }; then
-        rm -f "$l/at" 2>/dev/null; rmdir "$l" 2>/dev/null
-        cc_log "push: broke a stale ledger lock"
+    if (( i % 10 == 0 )); then
+      owner=""; [[ -s "$l/pid" ]] && IFS= read -r owner < "$l/pid"
+      # no pid yet: the owner is between mkdir and its write; wait for it
+      if [[ -n "$owner" ]] && ! cc_kl_alive "$owner"; then
+        rm -f "$l/pid" 2>/dev/null; rmdir "$l" 2>/dev/null
+        cc_log "push: took over the ledger lock of exited pid ${owner}"
+        continue
       fi
     fi
-    if (( i > 150 )); then cc_log_once kl_lock "push: ledger lock busy for 3 s; updating without it"; return 1; fi
+    if (( i > 150 )); then cc_log "push: ledger lock busy for 3 s (held by pid ${owner:-?}); update skipped, gate stays closed"; return 1; fi
     sleep 0.02 2>/dev/null || sleep 1
   done
-  cc_epoch_now_var now; printf '%s\n' "$now" > "$l/at" 2>/dev/null
+  printf '%s\n' "$$" > "$l/pid" 2>/dev/null
   CC_KL_LOCKED=1
 }
 cc_kl_unlock() {
   (( CC_KL_LOCKED )) || return 0
-  rm -f "$CC_KL_S.lock/at" 2>/dev/null; rmdir "$CC_KL_S.lock" 2>/dev/null; CC_KL_LOCKED=0
+  rm -f "$CC_KL_S.lock/pid" 2>/dev/null; rmdir "$CC_KL_S.lock" 2>/dev/null; CC_KL_LOCKED=0
+}
+
+# 0.5.3: <prefix>.owed is only ever written through cc_kl_owed_put, which
+# also writes <prefix>.owed.sum ("<lines> <cksum>"). cc_kl_owed_ok fails when
+# the two disagree (the ledger was truncated or edited outside cc-anchor) or
+# a line is not a ledger item: the gate then fails closed.
+cc_kl_owed_put() {  # <prefix> <content without trailing newline | "">
+  local h="$1" n=0 sum="-"
+  if [[ -n "$2" ]]; then
+    printf '%s\n' "$2" > "$h.owed.$$" 2>/dev/null && mv -f "$h.owed.$$" "$h.owed" || return 1
+    n="$(grep -c . "$h.owed" 2>/dev/null)"; sum="$(cksum < "$h.owed" 2>/dev/null)"; sum="${sum%% *}"
+  else rm -f "$h.owed" 2>/dev/null; fi
+  printf '%s %s\n' "$n" "$sum" > "$h.owed.sum.$$" 2>/dev/null && mv -f "$h.owed.sum.$$" "$h.owed.sum"
+}
+cc_kl_owed_ok() {  # <prefix>
+  local h="$1" n s cur
+  [[ -e "$h.owed.sum" ]] || { [[ -e "$h.owed" ]] && return 1; return 0; }
+  read -r n s < "$h.owed.sum" 2>/dev/null || return 1
+  if [[ "$n" == 0 ]]; then [[ ! -s "$h.owed" ]]; return; fi
+  [[ -s "$h.owed" ]] || return 1
+  cur="$(cksum < "$h.owed" 2>/dev/null)"; [[ "${cur%% *}" == "$s" ]] || return 1
+  [[ "$(grep -c . "$h.owed" 2>/dev/null)" == "$n" ]]
+}
+cc_kl_owed_move() {  # <from prefix> <to prefix> — append, keep both sums right
+  local all
+  all="$( { cc_kl_slurp "$2.owed"; [[ -s "$2.owed" ]] && echo; cc_kl_slurp "$1.owed"; } | grep . )"
+  cc_kl_owed_put "$2" "$all"; cc_kl_owed_put "$1" ""
+  rm -f "$1.owed.sum" 2>/dev/null
 }
 
 # Every ledger of the session, one prefix per line: the main agent, the
@@ -1378,7 +1415,11 @@ cc_kl_ledger_feed() {
   feed="$(jq -r --arg mode feed -f "$CC_LIB_DIR/owed.jq" <<<"$1" 2>/dev/null)" || return 0
   [[ "$feed" == '{"p":[],"r":[]}' || -z "$feed" ]] && return 0
   local haspend=1; [[ "$feed" == '{"p":[],'* ]] && haspend=0
-  cc_kl_lock
+  if ! cc_kl_lock; then
+    # fail closed: keep the input; the gate denies until it is applied
+    printf '%s\n%s' "$only" "$1" > "$CC_KL_S.feedq.$$" 2>/dev/null && mv -f "$CC_KL_S.feedq.$$" "$CC_KL_S.feedq"
+    return 0
+  fi
   while IFS= read -r h; do
     [[ -n "$h" ]] || continue
     if [[ -n "$only" ]]; then
@@ -1392,14 +1433,24 @@ cc_kl_ledger_feed() {
     out="$(jq -nr --arg mode reg --arg feed "$feed" --arg owed "$(cc_kl_slurp "$h.owed")" \
             --arg "done" "$(cc_kl_slurp "$h.done")" --arg reads "$(cc_kl_slurp "$h.reads")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || continue
     n0=0; [[ -s "$h.owed" ]] && n0="$(grep -c . "$h.owed" 2>/dev/null)"
-    if [[ -n "$out" ]]; then printf '%s\n' "$out" > "$h.owed.$$" 2>/dev/null && mv -f "$h.owed.$$" "$h.owed"
-    else rm -f "$h.owed" 2>/dev/null; fi
+    cc_kl_owed_put "$h" "$out" || continue
     printf '%s' "$feed" > "$h.fed" 2>/dev/null
     n1=0; [[ -n "$out" ]] && n1="$(grep -c . <<<"$out")"
     [[ "$n0" != "$n1" ]] && cc_log "push: ledger: $(cc_kl_who "$h") owes ${n1} re-read(s) (was ${n0})${only:+ (actor ${only:0:64})}"
   done < <(cc_kl_holders)
+  rm -f "$CC_KL_S.feedq" 2>/dev/null
   cc_kl_unlock
   return 0
+}
+
+# cc_kl_ledger_retry — a feed skipped on a busy lock is applied now (pulse
+# and push call it first). 1 while it is still queued (the gate denies).
+cc_kl_ledger_retry() {
+  [[ -e "$CC_KL_S.feedq" ]] || return 0
+  local only raw
+  { IFS= read -r only; raw="$(cat)"; } < "$CC_KL_S.feedq" 2>/dev/null
+  cc_kl_ledger_feed "$raw" "$only"
+  [[ ! -e "$CC_KL_S.feedq" ]]
 }
 
 # cc_kl_inherit — a subagent seen alive for the first time takes what every
@@ -1410,8 +1461,11 @@ cc_kl_inherit() {
   [[ -n "$CC_KL_AGENT" ]] || return 0
   mkdir -p "$CC_RUN/push" 2>/dev/null || return 0
   local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" h x owed="" reads="" out n
-  cc_kl_lock
-  for x in owed "done" reads; do
+  # busy: not inherited yet, so not .live — retried at the next hook; the
+  # gate denies this agent meanwhile (<B>.busy)
+  cc_kl_lock || { : > "$CC_KL_B.busy" 2>/dev/null; return 0; }
+  [[ -e "$P.owed" || -e "$P.owed.sum" ]] && cc_kl_owed_move "$P" "$CC_KL_B"
+  for x in "done" reads; do
     if [[ -e "$P.$x" ]]; then cat "$P.$x" >> "$CC_KL_B.$x" 2>/dev/null; rm -f "$P.$x" 2>/dev/null; fi
   done
   rm -f "$P.fed" 2>/dev/null
@@ -1423,7 +1477,7 @@ cc_kl_inherit() {
   if [[ -n "$owed" || -s "$CC_KL_B.owed" ]]; then
     out="$(jq -nr --arg mode merge --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")"$'\n'"$owed" --arg "done" "$(cc_kl_slurp "$CC_KL_B.done")" -f "$CC_LIB_DIR/owed.jq" 2>/dev/null)" || out=""
     if [[ -n "$out" ]]; then
-      printf '%s\n' "$out" > "$CC_KL_B.owed.$$" 2>/dev/null && mv -f "$CC_KL_B.owed.$$" "$CC_KL_B.owed"
+      cc_kl_owed_put "$CC_KL_B" "$out"
       n="$(grep -c . <<<"$out")"
       cc_log "push: ledger: $(cc_kl_who "$CC_KL_B") starts owing ${n} re-read(s) the session's agents still owe"
     fi
@@ -1432,7 +1486,9 @@ cc_kl_inherit() {
     { cc_kl_slurp "$CC_KL_B.reads"; [[ -s "$CC_KL_B.reads" ]] && echo; printf '%s' "$reads"; } | grep . | sort -u > "$CC_KL_B.reads.$$" 2>/dev/null \
       && mv -f "$CC_KL_B.reads.$$" "$CC_KL_B.reads"
   fi
+  [[ -e "$CC_KL_B.owed.sum" ]] || cc_kl_owed_put "$CC_KL_B" "$(cc_kl_slurp "$CC_KL_B.owed")"
   : > "$CC_KL_B.live" 2>/dev/null
+  rm -f "$CC_KL_B.busy" 2>/dev/null
   cc_kl_unlock
   return 0
 }
@@ -1443,8 +1499,10 @@ cc_kl_ledger_park() {
   [[ -e "$CC_KL_B.live" || -e "$CC_KL_B.owed" || -e "$CC_KL_B.done" || -e "$CC_KL_B.reads" ]] || return 0
   local P="$CC_KL_S.stopped/a-$CC_KL_AGENT" x
   mkdir -p "$CC_KL_S.stopped" 2>/dev/null || return 0
-  cc_kl_lock
-  for x in owed "done" reads; do
+  # busy: the ledger stays where it is (a resume finds it in place)
+  cc_kl_lock || return 0
+  cc_kl_owed_move "$CC_KL_B" "$P"
+  for x in "done" reads; do
     if [[ -e "$CC_KL_B.$x" ]]; then cat "$CC_KL_B.$x" >> "$P.$x" 2>/dev/null; rm -f "$CC_KL_B.$x" 2>/dev/null; fi
     [[ -e "$P.$x" ]] || : > "$P.$x" 2>/dev/null
   done
@@ -1456,25 +1514,39 @@ cc_kl_ledger_park() {
 # read: owed items it re-read at the current version clear (for this agent
 # only), and the blocks / documents it read are remembered. The jq runs only
 # when the result can carry kronicle-lite content (a block_id, a
-# kronicle://docs/ resource, a Bash `kronicle-lite get`).
+# kronicle://docs/ resource, a Bash `kronicle-lite get`). A re-read through
+# a plain `kronicle-lite get` in Bash clears only when kronicle-lite itself
+# confirms it (read-only `pending --actor`: the item is no longer pending
+# for that actor, i.e. it recorded a read of the current version); if that
+# check fails, nothing clears. On a busy lock nothing clears either.
 cc_kl_observe() {
   [[ -e "$CC_KL_S.klcap" ]] || return 0
   local p="$1"
   if [[ "$p" == *'block_id'* || "$p" == *'kronicle://docs/'* ]]; then :
   elif [[ "$p" =~ \"tool_name\":[[:space:]]*\"Bash\" && "$p" =~ (kronicle-lite|cli\.m?js)[\"\']?[[:space:]]+get ]]; then :
   else return 0; fi
-  local out held=0 tag v owed="" cleared="" forget="" reads=""
-  if [[ -s "$CC_KL_B.owed" ]]; then cc_kl_lock && held=1; fi
+  local out held=0 tag v owed="" cleared="" forget="" reads="" vb="" k actor rd item still
+  if [[ -s "$CC_KL_B.owed" ]]; then cc_kl_lock || return 0; held=1; fi
   out="$(jq -r --arg mode clear --arg owed "$(cc_kl_slurp "$CC_KL_B.owed")" -f "$CC_LIB_DIR/owed.jq" <<<"$p" 2>/dev/null)" || out=""
   while IFS=$'\t' read -r tag v; do
     case "$tag" in
       O) owed="${owed}${v}"$'\n';; C) cleared="${cleared}${v}"$'\n';;
+      B) vb="${vb}${v}"$'\n';;
       F) forget="${forget}${v}"$'\n';; R) reads="${reads}${v}"$'\n';;
     esac
   done <<<"$out"
+  if [[ -n "$vb" ]]; then
+    IFS=$'\x1f' read -r _ actor _ <<<"$vb"; [[ -n "$actor" ]] || actor="$CC_KL_ACTOR"
+    still="$(cc_kl_still_pending "$actor")" || still="*"
+    while IFS=$'\x1f' read -r k _ rd item; do
+      [[ -n "$k" ]] || continue
+      if [[ "$still" == "*" ]] || grep -Fxq -- "$k" <<<"$still"; then owed="${owed}${item}"$'\n'
+      else cleared="${cleared}${k}"$'\n'; [[ -n "$rd" ]] && forget="${forget}${rd}"$'\n'; fi
+    done <<<"$vb"
+    [[ "$still" == "*" ]] && cc_log "push: ledger: could not ask kronicle-lite to confirm a re-read by $(cc_kl_who "$CC_KL_B"); nothing cleared"
+  fi
   if [[ -n "$cleared" ]]; then
-    if [[ -n "$owed" ]]; then printf '%s' "$owed" > "$CC_KL_B.owed.$$" 2>/dev/null && mv -f "$CC_KL_B.owed.$$" "$CC_KL_B.owed"
-    else rm -f "$CC_KL_B.owed" 2>/dev/null; fi
+    cc_kl_owed_put "$CC_KL_B" "${owed%$'\n'}"
     printf '%s' "$cleared" >> "$CC_KL_B.done" 2>/dev/null
     cc_log "push: ledger: $(cc_kl_who "$CC_KL_B") re-read $(grep -c . <<<"$cleared") change(s) at the current version; $(grep -c . <<<"$owed") still owed"
   fi
@@ -1484,6 +1556,20 @@ cc_kl_observe() {
     mv -f "$CC_KL_B.reads.$$" "$CC_KL_B.reads" 2>/dev/null
   fi
   return 0
+}
+
+# cc_kl_still_pending <actor> — the ledger keys kronicle-lite still lists as
+# pending for <actor> (read-only `pending --json`), one per line; status 1
+# when it cannot be read.
+cc_kl_still_pending() {
+  local to raw pcwd; to="$(cc_cfg_raw push_timeout)"; [[ "$to" =~ ^[0-9]+$ ]] || to=3
+  pcwd="$(cd "$CC_ROOT" 2>/dev/null && pwd -P)"
+  local -a a=(pending --actor "$1" --json --cwd "${pcwd:-$CC_ROOT}")
+  [[ -n "$CC_KL_DD" ]] && a+=(--data-dir "$CC_KL_DD")
+  if [[ "$CC_KL_BIN" == *.js || "$CC_KL_BIN" == *.mjs ]]; then raw="$(cc_with_timeout "$to" node "$CC_KL_BIN" "${a[@]}" 2>/dev/null)" || return 1
+  else raw="$(cc_with_timeout "$to" "$CC_KL_BIN" "${a[@]}" 2>/dev/null)" || return 1; fi
+  jq -er '(.pending // error("no pending")) | .[] | if (.current.block_id // null) != null then "c:\(.current.block_id)" else "t:\(.read.block_id):\(.seq // "?")" end' <<<"$raw" 2>/dev/null
+  local rc=$?; (( rc == 0 || rc == 4 )) || [[ "$raw" == *'"pending": []'* || "$raw" == *'"pending":[]'* ]]
 }
 
 # ═══════════════════ 0.5.0: Bash claimed-path guard (sea-lite) ═══════════════════

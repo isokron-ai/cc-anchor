@@ -61,6 +61,27 @@ root="${CLAUDE_PROJECT_DIR:-}"
 if [[ -z "$root" && "$input" =~ \"cwd\":[[:space:]]*\"([^\"]*)\" ]]; then root="${BASH_REMATCH[1]}"; fi
 cc_resolve "${root:-$PWD}"
 
+# 0.5.3: cc-anchor's own state (the per-agent re-read ledger, the push
+# switches) is not the agent's to edit — truncating a ledger cleared the
+# gate. Always on, independent of the scope guard. The parent directory is
+# also compared physically, so a symlink or `..` does not get around it.
+if [[ "$input" =~ \"(file_path|notebook_path)\":[[:space:]]*\"([^\"]*)\" ]]; then
+  tf="${BASH_REMATCH[2]//\\//}"; run_phys=""; tf_phys=""
+  [[ -d "$CC_RUN" ]] && run_phys="$(cd "$CC_RUN" 2>/dev/null && pwd -P)"
+  # nearest existing parent (relative paths resolve against the project dir)
+  d="${tf%/*}"; [[ "$d" == "$tf" ]] && d="."
+  [[ "$d" == /* || "$d" == . ]] || d="$CC_ROOT/$d"
+  while [[ -n "$d" && ! -d "$d" ]]; do nd="${d%/*}"; [[ "$nd" == "$d" ]] && nd=""; d="$nd"; done
+  [[ -n "$d" ]] && tf_phys="$(cd "$d" 2>/dev/null && pwd -P)/"
+  if [[ "$tf" == *"/.claude/cc-anchor/"* || "$tf" == "$CC_RUN/"* || ( -n "$run_phys" && ( "$tf_phys" == "$run_phys/"* || "$tf_phys/" == "$run_phys/" ) ) ]]; then
+    msg="cc-anchor: did NOT edit ${tf} — it is inside ${CC_RUN}, cc-anchor's own state (the per-agent re-read ledger and the gate's switches). Changing it would bypass the gate. To reset cc-anchor, ask the operator."
+    if cc_have_jq; then cc_emit_deny "$msg"
+    else printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"cc-anchor: did NOT edit this file — it is inside cc-anchor'"'"'s own state directory (.claude/cc-anchor)."}}'; fi
+    cc_log "scope: denied an edit of cc-anchor's own state (${tf:0:120})"
+    exit 0
+  fi
+fi
+
 cc_on scope_guard 0 || exit 0
 cc_have_jq || exit 0
 
