@@ -159,7 +159,9 @@ test('TEL-7: overhead record only when something was flushed (or CC_ANCHOR_TELEM
   } finally { w.sb.cleanup(); }
 });
 
-test('TEL-8: a 100 MB transcript under `timeout 10` — bounded work per hook, no exit 124, no leftover copy, no duplicates, valid JSONL, resumes', { timeout: 300000 }, () => {
+const HAS_TIMEOUT = spawnSync('timeout', ['1', 'true']).status === 0; // GNU coreutils; not on stock macOS
+
+test('TEL-8: a 100 MB transcript under `timeout 10` — bounded work per hook, no exit 124, no leftover copy, no duplicates, valid JSONL, resumes', { timeout: 300000, skip: !HAS_TIMEOUT && 'no timeout(1)' }, () => {
   const w = world();
   try {
     const pad = 'x'.repeat(1900);
@@ -187,7 +189,8 @@ test('TEL-8: a 100 MB transcript under `timeout 10` — bounded work per hook, n
       progress.push(got.length);
       assert.deepEqual(leftovers(w.sb), [], 'no leftover staged chunk');
     }
-    assert.ok(progress[0] > 0 && progress[1] > progress[0], `resumed: ${progress}`);
+    // a fast machine may finish in the first run; otherwise the second one continues
+    assert.ok(progress[0] > 0 && (progress[0] === n || progress[1] > progress[0]), `resumed: ${progress} of ${n}`);
   } finally { w.sb.cleanup(); }
 });
 
@@ -197,15 +200,17 @@ test('TEL-9: a line longer than the window is skipped and reported by size; the 
     fs.writeFileSync(w.tx, J([asst('msg_1', U(1, 1), [{ type: 'text', text: 'a' }]),
       { type: 'user', timestamp: '2026-11-05T10:00:02.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'y'.repeat(300000) }] } },
       asst('msg_2', U(2, 2), [{ type: 'text', text: 'b' }], '2026-11-05T10:00:03.000Z')]));
-    assert.equal(w.ev('Stop', {}, { CC_ANCHOR_TELEMETRY_WINDOW: '65536' }).status, 0);
+    const r = w.ev('Stop', {}, { CC_ANCHOR_TELEMETRY_WINDOW: '65536' });
+    assert.equal(r.status, 0);
     const recs = w.recs();
-    assert.deepEqual(ids(recs), ['msg_1', 'msg_2']);
+    const why = () => JSON.stringify({ recs: recs.map((x) => [x.ev, x.message_id, x.bytes]), stderr: r.stderr, log: fs.existsSync(path.join(w.sb.run, 'log')) ? fs.readFileSync(path.join(w.sb.run, 'log'), 'utf8') : '', state: fs.readdirSync(path.join(w.sb.run, 'telemetry.state')) });
+    assert.deepEqual(ids(recs), ['msg_1', 'msg_2'], why());
     const [o] = recs.filter((x) => x.ev === 'oversize_line');
-    assert.ok(o && o.bytes > 300000, JSON.stringify(o));
+    assert.ok(o && o.bytes > 300000, why());
   } finally { w.sb.cleanup(); }
 });
 
-test('TEL-10: a run killed mid-window (SIGKILL) leaves no torn line; the next run cleans its scratch and counts nothing twice', () => {
+test('TEL-10: a run killed mid-window (SIGKILL) leaves no torn line; the next run cleans its scratch and counts nothing twice', { skip: !HAS_TIMEOUT && 'no timeout(1)' }, () => {
   const w = world();
   try {
     const L = [];

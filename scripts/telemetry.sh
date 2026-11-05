@@ -101,15 +101,21 @@ lock="$st/lock"; locked=0; tmpd="$st/tmp.$$"
 cleanup() { rm -rf "$tmpd" 2>/dev/null; if (( locked )); then rm -f "$lock/pid" 2>/dev/null; rmdir "$lock" 2>/dev/null; fi; }
 trap cleanup EXIT
 trap 'exit 1' TERM INT HUP
-i=0
+i=0; lstart=$SECONDS
 while ! mkdir "$lock" 2>/dev/null; do
-  owner=""; [[ -s "$lock/pid" ]] && IFS= read -r owner < "$lock/pid"
-  if [[ -n "$owner" ]] && ! alive "$owner"; then rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null; continue; fi
-  i=$((i + 1)); (( i > 100 )) && { cc_log "telemetry: another run holds the lock; skipped (resumes next time)"; exit 0; }
+  # the owner's liveness is checked every 10th try (ps is a fork); at most ~2 s
+  if (( i % 10 == 0 )); then
+    owner=""; [[ -s "$lock/pid" ]] && IFS= read -r owner < "$lock/pid"
+    if [[ -n "$owner" ]] && ! alive "$owner"; then rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null; continue; fi
+  fi
+  i=$((i + 1))
+  if (( i > 100 || SECONDS - lstart >= 2 )); then cc_log "telemetry: another run holds the lock; skipped (resumes next time)"; exit 0; fi
   sleep 0.02 2>/dev/null || sleep 1
 done
 locked=1; printf '%s\n' "$$" > "$lock/pid"
 mkdir "$tmpd" 2>/dev/null || exit 0
+# state temp files of a killed run (written just before a rename)
+for t in "$st"/*.tmp.*; do [[ -e "$t" ]] && ! alive "${t##*.}" && rm -f "$t"; done
 
 # Which transcripts this event flushes.
 files=()
