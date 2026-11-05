@@ -248,3 +248,18 @@ test('ADV-8: a subagent re-reading before any push does not leave the main agent
     assert.equal(w.decision(w.pre('./bin/deploy --target staging-b', 'agent-s3')), 'deny');
   } finally { w.sb.cleanup(); }
 });
+
+test('run-dir guard: relative, missing-parent and root-level paths are allowed promptly (no hang)', () => {
+  const sb = sandbox();
+  try {
+    for (const f of ['a.md', 'x/y/z.md', '/a.md', path.join(sb.proj, 'no', 'such', 'dir', 'f.ts'), '']) {
+      const t0 = Date.now();
+      const r = spawnSync('bash', [path.join(SCRIPTS, 'pre-tool-use.sh')], { input: JSON.stringify({ session_id: 's', cwd: sb.proj, hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: f, content: '' } }), encoding: 'utf8', env: sb.env, timeout: 5000 });
+      assert.equal(r.status, 0, `${f}: ${r.error ?? ''}`);
+      assert.equal(r.stdout, '', f);
+      assert.ok(Date.now() - t0 < 5000, f);
+    }
+    const r = spawnSync('bash', [path.join(SCRIPTS, 'pre-tool-use.sh')], { input: JSON.stringify({ session_id: 's', cwd: sb.proj, hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: path.join(sb.proj, 'x', '..', '.claude', 'cc-anchor', 'push', 'new.owed'), content: '' } }), encoding: 'utf8', env: sb.env, timeout: 5000 });
+    assert.match(r.stdout, /"deny"/, 'a `..` path into the run dir is still denied');
+  } finally { sb.cleanup(); }
+});
