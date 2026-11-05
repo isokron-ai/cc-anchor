@@ -68,7 +68,10 @@ cc_resolve "${root:-$PWD}"
 if [[ "$input" =~ \"(file_path|notebook_path)\":[[:space:]]*\"([^\"]*)\" ]]; then
   tf="${BASH_REMATCH[2]//\\//}"; run_phys=""; tf_phys=""
   [[ -d "$CC_RUN" ]] && run_phys="$(cd "$CC_RUN" 2>/dev/null && pwd -P)"
-  d="${tf%/*}"; while [[ -n "$d" && ! -d "$d" ]]; do d="${d%/*}"; done
+  # nearest existing parent (relative paths resolve against the project dir)
+  d="${tf%/*}"; [[ "$d" == "$tf" ]] && d="."
+  [[ "$d" == /* || "$d" == . ]] || d="$CC_ROOT/$d"
+  while [[ -n "$d" && ! -d "$d" ]]; do nd="${d%/*}"; [[ "$nd" == "$d" ]] && nd=""; d="$nd"; done
   [[ -n "$d" ]] && tf_phys="$(cd "$d" 2>/dev/null && pwd -P)/"
   if [[ "$tf" == *"/.claude/cc-anchor/"* || "$tf" == "$CC_RUN/"* || ( -n "$run_phys" && ( "$tf_phys" == "$run_phys/"* || "$tf_phys/" == "$run_phys/" ) ) ]]; then
     msg="cc-anchor: did NOT edit ${tf} — it is inside ${CC_RUN}, cc-anchor's own state (the per-agent re-read ledger and the gate's switches). Changing it would bypass the gate. To reset cc-anchor, ask the operator."
