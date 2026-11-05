@@ -73,7 +73,7 @@ case "$ev" in
 esac
 
 now=""; cc_now_var now
-for spec in "${files[@]}"; do
+for spec in ${files[@]+"${files[@]}"}; do  # bash 3.2 + set -u: an empty array is unbound
   f="${spec%|*}"; ag="${spec##*|}"
   [[ -s "$f" ]] || continue
   key="${f##*/}"; key="${key//[^A-Za-z0-9._-]/_}"; of="$off_dir/$key"

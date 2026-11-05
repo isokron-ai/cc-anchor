@@ -11,6 +11,7 @@ import path from 'node:path';
 import { SCRIPTS, FIXTURES, sandbox, hook } from './helpers.mjs';
 
 const FIX = path.join(FIXTURES, 'transcript-telemetry.jsonl');
+const HAS_US_CLOCK = spawnSync('bash', ['-c', 'echo -n "${EPOCHREALTIME:-}"'], { encoding: 'utf8' }).stdout !== '';
 const lines = () => fs.readFileSync(FIX, 'utf8').split('\n').filter(Boolean);
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 
@@ -46,8 +47,10 @@ test('telemetry: usage as the provider reported it, one record per API response 
     assert.ok(recs.every((x) => x.schema === 'cca.telemetry/1'));
     assert.ok(recs.filter((x) => x.ev !== 'telemetry_overhead').every((x) => x.session_id === 'sess-tel-0001' && x.observer === 'telemetry'));
     const [o] = recs.filter((x) => x.ev === 'telemetry_overhead');
-    assert.equal(o.hook, 'Stop');
-    assert.equal(typeof o.hook_ms, 'number');
+    if (HAS_US_CLOCK) {
+      assert.equal(o.hook, 'Stop');
+      assert.equal(typeof o.hook_ms, 'number');
+    } else assert.equal(o, undefined, 'bash < 5 (macOS /bin/bash 3.2): no clock without a fork, so no overhead record');
   } finally { w.sb.cleanup(); }
 });
 
@@ -88,6 +91,8 @@ test('telemetry: SubagentStop reads the subagent transcript (agent_id); SessionE
     fs.writeFileSync(a1, lines().join('\n') + '\n');
     fs.writeFileSync(path.join(sub, 'agent-a2.jsonl'), lines().join('\n') + '\n');
     fs.writeFileSync(w.tx, lines().slice(0, 4).join('\n') + '\n');
+    const none = w.ev('SubagentStop', { agent_id: 'a0' }); // no agent_transcript_path: nothing to read
+    assert.deepEqual([none.status, none.stderr], [0, ''], 'empty file list is fine on bash 3.2 + set -u too');
     w.ev('SubagentStop', { agent_id: 'a1', agent_transcript_path: a1 });
     let recs = w.recs();
     assert.ok(recs.filter((x) => x.ev === 'model_call').every((x) => x.agent_id === 'a1'));
