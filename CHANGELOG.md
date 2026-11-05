@@ -20,6 +20,20 @@ SemVer.
 - `cc_kl_pending_fmt` moved into `scripts/owed.jq` (mode `fmt`) so the gate
   and the ledger print the same pending lines.
 
+- **Ledger gate bypasses (PR #6 review).**
+  - A doc read with no current version, a partial read (`| head`), an
+    erroring get, a grep that mentions the doc, or an `echo` of the new text
+    no longer clears an owed change. Evidence must be a kronicle-lite tool
+    result, or one plain successful `kronicle-lite get`, and kronicle-lite
+    must confirm the read (`pending --actor`). Content hashes are compared
+    when both sides carry one.
+  - The run dir is guarded in the Write/Edit hook and the Bash pulse.
+  - `.owed.sum` makes a truncated or edited ledger fail closed.
+  - The ledger lock is never broken while its owner lives. A busy lock skips
+    the update and fails closed (a queued feed, `<agent>.busy`) instead of
+    writing unlocked.
+  - No jq while kronicle-lite is in use: the pulse denies, loudly.
+
 ## [0.5.1] — 2026-11-01
 
 Fixes the pending gate after hardening round 2 (agent-memory-bench

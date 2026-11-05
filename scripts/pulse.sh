@@ -40,7 +40,6 @@ set -u
 CC_HERE="${BASH_SOURCE[0]%/*}"; [[ "$CC_HERE" == "${BASH_SOURCE[0]}" ]] && CC_HERE=.
 # shellcheck source=./lib.sh
 . "$CC_HERE/lib.sh" || exit 0
-cc_have_jq || exit 0
 
 input=""
 IFS= read -r -d '' input || true
@@ -50,6 +49,17 @@ IFS= read -r -d '' input || true
 root="${CLAUDE_PROJECT_DIR:-}"
 if [[ -z "$root" && "$input" =~ \"cwd\":[[:space:]]*\"([^\"]*)\" ]]; then root="${BASH_REMATCH[1]}"; fi
 cc_resolve "${root:-$PWD}"
+
+# 0.5.3: without jq nothing here can be checked. Where kronicle-lite is in
+# use (this project's push state says so) that FAILS CLOSED — every Bash
+# call is denied, loudly — instead of silently letting everything run.
+# Elsewhere there is nothing to gate and the call runs.
+if ! cc_have_jq; then
+  if compgen -G "$CC_RUN/push/*.klcap" >/dev/null 2>&1 || compgen -G "$CC_RUN/push/*.cfg" >/dev/null 2>&1; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"cc-anchor pulse: did NOT run this command — jq is not installed (or not on the PATH Claude Code gives hooks), so cc-anchor cannot check whether something you relied on in kronicle-lite changed. It fails closed: no Bash call runs until jq is available. Tell the operator to install jq (brew install jq / apt-get install jq)."}}'
+  fi
+  exit 0
+fi
 
 # 0.5.0 Bash claimed-path guard: mark when this call began (one builtin
 # write; PostToolUse compares against it). Independent of kronicle-lite.
@@ -96,6 +106,15 @@ cc_kl_enabled || exit 0
 if [[ "$ro" != false ]]; then
   why="the gate could not analyse it"; head="(this Bash call)"
   cc_log_once pulse_ro_err "pulse: the read-only classifier failed; treating the call as not read-only"
+fi
+
+# 0.5.3: cc-anchor's own state (the per-agent ledger, the push switches)
+# is not the agent's to change: a call that is not read-only and names the
+# run dir is denied in every pulse_mode, pending or not.
+if [[ "$input" == *".claude/cc-anchor"* || "$input" == *"${CC_RUN}"* ]]; then
+  cc_log "pulse: denied \`${head:0:60}\` (writes cc-anchor's own state)"
+  cc_emit_deny "cc-anchor pulse: did NOT run \`${head}\` — it is not read-only and touches ${CC_RUN}, which holds cc-anchor's own state (the per-agent re-read ledger and the gate's switches). Changing it would bypass the gate. Reading it is fine; to reset cc-anchor, ask the operator."
+  exit 0
 fi
 
 mode="$(cc_cfg_raw pulse_mode)"; [[ "$mode" == warn ]] || mode="deny"
@@ -184,6 +203,16 @@ if [[ -e "$CC_KL_S.klcap" ]]; then
   # kronicle-lite's count above is per actor, and the session's agents share
   # it: another agent's re-read clears that count, never this ledger.
   owed_n=0; owed_x=""; me="$(cc_kl_who "$CC_KL_B")"
+  # 0.5.3: fail closed on a ledger that cannot be trusted or is not current:
+  # changed outside cc-anchor, an update still queued behind a busy lock, or
+  # a subagent whose inheritance could not be written yet.
+  cc_kl_ledger_retry || gate "ledger update queued" "cc-anchor could not update the per-agent re-read ledger (its lock was busy), so it cannot tell what you still owe." "Only read-only Bash commands run (${RO_LIST}) until it is updated; this call is not one: ${why}. Retry in a moment."
+  if [[ -e "$CC_KL_B.busy" ]]; then cc_kl_inherit; fi
+  [[ -e "$CC_KL_B.busy" ]] && gate "ledger busy" "cc-anchor could not yet give you (${me}) what this session's agents still owe a re-read of (the ledger lock was busy)." "Only read-only Bash commands run (${RO_LIST}) until it can; this call is not one: ${why}. Retry in a moment."
+  cc_kl_owed_ok "$CC_KL_B" || gate "ledger tampered" "the per-agent re-read ledger for you (${me}) was changed outside cc-anchor (truncated, edited or deleted), so cc-anchor cannot tell what you still owe." "Only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}. Re-read the documents you rely on, then ask the operator to reset cc-anchor's state for this session."
+  if [[ -s "$CC_KL_B.owed" ]] && jq -e -R 'fromjson? | objects | has("k") | not' "$CC_KL_B.owed" >/dev/null 2>&1; then
+    gate "ledger unreadable" "the per-agent re-read ledger for you (${me}) holds a line cc-anchor cannot read, so it cannot tell what you still owe." "Only read-only Bash commands run (${RO_LIST}); this call is not one: ${why}."
+  fi
   if [[ -s "$CC_KL_B.owed" ]]; then
     while IFS= read -r l; do
       [[ -n "$l" ]] || continue
