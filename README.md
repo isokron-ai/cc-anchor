@@ -583,7 +583,7 @@ file; a half-written last line waits), and appends JSONL records
 | `tool_call` | tool result | `tool`, `tool_use_id`, `input_bytes`, `result_bytes`, `images`, `is_error`, `latency_ms`, `tool_response_tokens_est`, `est_method: "bytes/4"` |
 | `compaction` | `compact_boundary` | `trigger`, `pre_tokens`, `post_tokens`, `duration_ms` |
 | `compact_start` | `PreCompact` | `trigger` |
-| `telemetry_overhead` | hook run | `hook`, `hook_ms` (this hook's own time) |
+| `telemetry_overhead` | hook run | `hook`, `hook_ms` (this hook's own time; bash ≥ 5 only — macOS /bin/bash 3.2 has no clock without a fork) |
 
 Each API response is counted once in one flush, so the sum of the `turn_usage`
 records equals the sum of the `model_call` records. Token counts are never
