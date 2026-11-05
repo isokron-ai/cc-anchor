@@ -111,7 +111,7 @@ test('telemetry: off unless enabled; never copies content; secrets in names are 
     fs.writeFileSync(w.tx, L.join('\n') + '\n');
     w.ev('Stop');
     assert.ok(!fs.existsSync(w.out), 'not enabled: nothing written');
-    assert.ok(!fs.existsSync(path.join(w.sb.run, 'telemetry.off')), 'not enabled: no state either');
+    assert.ok(!fs.existsSync(path.join(w.sb.run, 'telemetry.state')), 'not enabled: no state either');
     w.ev('Stop', {}, { CC_ANCHOR_TELEMETRY: '1' });
     const text = fs.readFileSync(w.out, 'utf8');
     assert.doesNotMatch(text, /SECRET|ghp_ABCDEF|xxxxxxxxxx|boom|deploy it/, 'no transcript content, secrets redacted');

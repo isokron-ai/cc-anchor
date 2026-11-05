@@ -190,3 +190,55 @@ test('TEL-8: a 100 MB transcript under `timeout 10` — bounded work per hook, n
     assert.ok(progress[0] > 0 && progress[1] > progress[0], `resumed: ${progress}`);
   } finally { w.sb.cleanup(); }
 });
+
+test('TEL-9: a line longer than the window is skipped and reported by size; the lines around it are counted', () => {
+  const w = world();
+  try {
+    fs.writeFileSync(w.tx, J([asst('msg_1', U(1, 1), [{ type: 'text', text: 'a' }]),
+      { type: 'user', timestamp: '2026-11-05T10:00:02.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'y'.repeat(300000) }] } },
+      asst('msg_2', U(2, 2), [{ type: 'text', text: 'b' }], '2026-11-05T10:00:03.000Z')]));
+    assert.equal(w.ev('Stop', {}, { CC_ANCHOR_TELEMETRY_WINDOW: '65536' }).status, 0);
+    const recs = w.recs();
+    assert.deepEqual(ids(recs), ['msg_1', 'msg_2']);
+    const [o] = recs.filter((x) => x.ev === 'oversize_line');
+    assert.ok(o && o.bytes > 300000, JSON.stringify(o));
+  } finally { w.sb.cleanup(); }
+});
+
+test('TEL-10: a run killed mid-window (SIGKILL) leaves no torn line; the next run cleans its scratch and counts nothing twice', () => {
+  const w = world();
+  try {
+    const L = [];
+    for (let i = 0; i < 4000; i++) L.push(asst(`msg_${i}`, U(1, 1), [{ type: 'text', text: 'p'.repeat(900) }]));
+    fs.writeFileSync(w.tx, J(L));
+    const env = { ...w.sb.env, CC_ANCHOR_OBSERVER: 'telemetry', CC_ANCHOR_TELEMETRY_FILE: w.out, CC_ANCHOR_TELEMETRY_WINDOW: '262144' };
+    const input = JSON.stringify({ session_id: 'sess-tel-0001', transcript_path: w.tx, cwd: w.sb.proj, hook_event_name: 'Stop' });
+    for (const ms of ['0.3', '0.6']) spawnSync('timeout', ['-s', 'KILL', ms, 'bash', path.join(SCRIPTS, 'telemetry.sh')], { input, env });
+    // a lock left by a killed run belongs to a dead pid: taken over, not waited on
+    const r = spawnSync('bash', [path.join(SCRIPTS, 'telemetry.sh')], { input, env, encoding: 'utf8' });
+    assert.equal(r.status, 0);
+    const text = fs.existsSync(w.out) ? fs.readFileSync(w.out, 'utf8') : '';
+    const recs = text.split('\n').filter(Boolean).map((l) => JSON.parse(l)); // throws on a torn line
+    const got = ids(recs);
+    assert.equal(new Set(got).size, got.length, 'no duplicates');
+    assert.equal(got.length, 4000, 'everything counted once the run completes');
+    assert.deepEqual(fs.readdirSync(path.join(w.sb.run, 'telemetry.state')).filter((f) => /^tmp\.|^lock$|\.tmp\./.test(f)), []);
+  } finally { w.sb.cleanup(); }
+});
+
+test('TEL-11: a live lock is never broken — the second run skips and the first finishes alone', () => {
+  const w = world();
+  try {
+    fs.writeFileSync(w.tx, J([asst('msg_1', U(1, 1), [{ type: 'text', text: 'a' }])]));
+    const lock = path.join(w.sb.run, 'telemetry.state', 'lock');
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, 'pid'), `${process.pid}\n`); // alive
+    const t0 = Date.now();
+    assert.equal(w.ev('Stop').status, 0);
+    assert.ok(Date.now() - t0 < 6000);
+    assert.deepEqual(w.recs(), [], 'skipped while another (live) run holds the lock');
+    fs.rmSync(lock, { recursive: true });
+    w.ev('Stop');
+    assert.deepEqual(ids(w.recs()), ['msg_1']);
+  } finally { w.sb.cleanup(); }
+});

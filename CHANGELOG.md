@@ -16,7 +16,16 @@ SemVer.
   redacted. `--scan <transcript>` gives the same records offline; `--kronicle`
   maps them to draft kronicle-lite audit events (`call_measured`, `turn_usage`).
 - **Observer-effect switch** `CC_ANCHOR_OBSERVER=off|telemetry|telemetry+anchors`:
-  `off` and `telemetry` make every other cc-anchor hook a no-op.
+  `off` and `telemetry` make every other cc-anchor hook a no-op;
+  `off` also wins over `CC_ANCHOR_TELEMETRY=1`.
+- Telemetry is bounded and exactly-once: reads at most a 4 MiB window per jq
+  pass and 5 s per run (resumed next run), and moves the offset atomically
+  after the records are written. A seen-set of message ids, tool_use ids and
+  compactions stops a response straddling two windows, or a truncated or
+  rewritten transcript, from being counted twice. No transcript copies; one
+  run at a time (a live lock is never broken). Invalid usage counts are
+  flagged (`invalid_usage`), never coerced to 0. The overhead record is
+  written only on runs that flushed.
 
 ### Fixed
 - **Pending gate shared across subagents (L2-05, hardening-live).** One

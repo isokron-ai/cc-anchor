@@ -567,31 +567,38 @@ kronicle-lite cursor, head seq, mtime stamp, pending retractions),
 
 Benchmark accounting for MCP audits, at the model boundary: what each turn
 cost as the provider reported it, and when context was compacted. Off unless
-you set `CC_ANCHOR_OBSERVER` or `CC_ANCHOR_TELEMETRY=1`.
+you set `CC_ANCHOR_OBSERVER` or `CC_ANCHOR_TELEMETRY=1`. `CC_ANCHOR_OBSERVER=off` always wins: nothing is recorded.
 
 Hook payloads carry no token counts. The transcript does: each assistant
 entry holds `message.usage` exactly as the API returned it. `scripts/telemetry.sh`
 runs on `Stop`, `SubagentStop`, `PreCompact` and `SessionEnd`, reads only the
-transcript lines written since its last run (a byte offset per transcript
-file; a half-written last line waits), and appends JSONL records
+transcript lines written since its last run, and appends JSONL records
 (`scripts/telemetry.jq`, schema `cca.telemetry/1`):
 
 | `ev` | One per | Fields |
 | :- | :- | :- |
-| `model_call` | API response (content-block duplicates counted once; `<synthetic>` dropped) | `request_id`, `message_id`, `model`, `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens` |
-| `turn_usage` | flush (`closed_by`: the hook event) | the sums of the above, `api_calls`, `models`, `tool_calls`, `tool_result_bytes`, `tool_response_tokens_est`, `compactions` |
+| `model_call` | API response (content-block duplicates counted once; `<synthetic>` dropped) | `request_id`, `message_id`, `model`, `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`; a count that is not a non-negative integer is `null` and named in `invalid_usage` (never coerced to 0) |
+| `turn_usage` | window read (`closed_by`: the hook event) | the sums of the valid responses above, `api_calls`, `invalid_usage_calls` (when any), `models`, `tool_calls`, `tool_result_bytes`, `tool_response_tokens_est`, `compactions` |
 | `tool_call` | tool result | `tool`, `tool_use_id`, `input_bytes`, `result_bytes`, `images`, `is_error`, `latency_ms`, `tool_response_tokens_est`, `est_method: "bytes/4"` |
 | `compaction` | `compact_boundary` | `trigger`, `pre_tokens`, `post_tokens`, `duration_ms` |
 | `compact_start` | `PreCompact` | `trigger` |
-| `telemetry_overhead` | hook run | `hook`, `hook_ms` (this hook's own time; bash ≥ 5 only — macOS /bin/bash 3.2 has no clock without a fork) |
+| `oversize_line` | line longer than the window (skipped) | `transcript`, `bytes` |
+| `telemetry_overhead` | run that flushed records (every run with `CC_ANCHOR_TELEMETRY_OVERHEAD=1`) | `hook`, `hook_ms` (this hook's own time; bash ≥ 5 only — macOS /bin/bash 3.2 has no clock without a fork) |
 
-Each API response is counted once in one flush, so the sum of the `turn_usage`
-records equals the sum of the `model_call` records. Token counts are never
+**Exactly once, bounded.**
+- Each run reads at most `CC_ANCHOR_TELEMETRY_WINDOW` bytes (4 MiB) per jq pass, and works for at most `CC_ANCHOR_TELEMETRY_BUDGET` seconds (5; the hook timeout is 10). Whatever is left is read on the next run.
+- The byte offset per transcript moves only after a window's records are appended, and it is replaced atomically (temp file, sync, rename).
+- A window is staged (mode 0600, at most one window) in a private directory that is removed on exit. A killed run's directory is removed by the next run. The transcript is never copied.
+- A seen-set of the last 20,000 keys counted (message ids, tool_use ids, compactions) means a response whose entries straddle two windows is never counted twice. The same holds for a transcript found truncated or rewritten (shorter than the offset, or another head checksum): it is read again from the start, and nothing already counted is re-emitted.
+- One run at a time: a lock that carries its owner's pid. A dead owner's lock is taken over; a live one never is, and the second run skips.
+- A half-written last line waits for the next run. A line longer than the window is skipped and reported as `oversize_line`.
+
+So the sum of the `turn_usage` records equals the sum of the valid `model_call` records. Token counts are never
 derived or added to. `tool_response_tokens_est` is a bytes/4 estimate kept in
 its own field. The provider's input and cache counts already include tool
 results, so adding the two would double-count. `latency_ms` is the
 `tool_result` timestamp minus the `tool_use` timestamp in the transcript.
-It includes hook time, and is null when the pair is split across two flushes.
+It includes hook time; a tool use whose result lands in a later window is carried over (`<key>.open`).
 Subagents are recorded with their `agent_id`, from `agent_transcript_path` on
 `SubagentStop` and from `<session>/subagents/agent-*.jsonl` on `SessionEnd`.
 
@@ -600,7 +607,7 @@ Subagents are recorded with their `agent_id`, from `agent_transcript_path` on
 | Value | Telemetry | Card, push, gate, guards |
 | :- | :- | :- |
 | unset | only with `CC_ANCHOR_TELEMETRY=1` | on, as usual |
-| `off` | no | no-op (every hook exits at once) |
+| `off` | no (even with `CC_ANCHOR_TELEMETRY=1`) | no-op (every hook exits at once) |
 | `telemetry` | yes | no-op |
 | `telemetry+anchors` | yes | on |
 
@@ -627,8 +634,9 @@ Tool names, the one free-text field, are passed through secret redaction
 latency come from the transcript. Measured on the dev sandbox (Linux, bash 5,
 jq 1.7):
 - disabled: ~2 ms per Stop-class event (bash start + one `case`);
-- enabled with nothing new: ~20 ms;
-- enabled, flushing a 23-API-call / 165 KB turn: ~40–55 ms (`hook_ms` p50 37 ms over 20 runs).
+- enabled with nothing new: `hook_ms` p50 29 ms;
+- enabled, flushing a 23-API-call / 165 KB turn: `hook_ms` p50 70 ms, max 145 ms (10 runs);
+- a 100 MB transcript: about 5 s per run, resumed on the next one (tests/telemetry-adv.test.mjs).
 
 | Variable | Default | Meaning |
 | :- | :- | :- |
@@ -636,6 +644,8 @@ jq 1.7):
 | `CC_ANCHOR_TELEMETRY` | `0` | `1` records telemetry with cc-anchor otherwise unchanged |
 | `CC_ANCHOR_TELEMETRY_FILE` | `.claude/cc-anchor/telemetry.jsonl` | JSONL output path |
 | `CC_ANCHOR_TELEMETRY_FORMAT` | `cca` | `kronicle` for the draft kronicle-lite mapping |
+| `CC_ANCHOR_TELEMETRY_WINDOW`, `…_BUDGET` | `4194304`, `5` | bytes per jq pass; seconds of work per run |
+| `CC_ANCHOR_TELEMETRY_OVERHEAD` | `0` | `1`: a `telemetry_overhead` record on every run |
 
 Claude Code only: the Cursor adapter does not install it.
 
