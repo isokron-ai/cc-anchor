@@ -47,10 +47,13 @@ jobs:
         with:
           repository: rafe-walker/kronicle-lite
           ref: ${{ matrix.kronicle_ref }}
-          path: .kronicle-lite-src
+          # The directory must be named kronicle-lite: the pulse's read-only
+          # classifier and the .mcp.json detection know the CLI as
+          # …/kronicle-lite/dist/cli.js (tests/stress/gate.sh relies on it).
+          path: .ci/kronicle-lite
       - name: Build kronicle-lite from source (no publish)
         if: ${{ matrix.kronicle_ref }}
-        working-directory: .kronicle-lite-src
+        working-directory: .ci/kronicle-lite
         run: |
           npm ci --no-audit --no-fund
           npm run build
