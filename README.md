@@ -43,6 +43,9 @@ sea-lite claim — see [Pending](#pending-kronicle-lite--080).
 **0.5.1** stops trying to spot dangerous commands in shell text: while a
 change is pending only provably read-only Bash calls run, and while nothing
 is pending nothing is denied — see [The gate](#the-gate-pretooluse-bash).
+**0.6.0** (unreleased) gates each agent on its own re-reads, not on a
+session-wide count (see [Pending](#pending-kronicle-lite--080)), and adds
+opt-in [audit telemetry](#audit-telemetry-opt-in) with an observer-effect switch.
 
 ## Install
 
@@ -344,7 +347,8 @@ project path and its physical (symlink-resolved) path.
 The CLI is looked up like the other hooks do (`CC_ANCHOR_KRONICLE_LITE_BIN`,
 `PATH`, the plugin cache, `node_modules`) and finally in the npx cache, where
 the isokron-plugins `npx -y kronicle-lite@… serve` launch leaves it. Needs
-kronicle-lite ≥ 0.5.0 (retraction diffs); tested against 0.5.0 and 0.6.0.
+kronicle-lite ≥ 0.5.0 (retraction diffs); CI runs the contract tests against
+0.7.0 and 0.8.0 (`.github/workflows/ci.yml`).
 
 | Switch | Default | |
 |---|---|---|
@@ -396,7 +400,7 @@ Re-read each (recall, or kronicle://docs/<slug>): that clears this check by itse
   naming another actor never clears what one of them has pending. The
   parent is not gated on a subagent's private actor. A stopped subagent's
   actors are kept, so a resumed one (same `agent_id`) is gated on them.
-- **Per agent, not just per actor (0.5.2).** The agents of one session
+- **Per agent, not just per actor (0.6.0).** The agents of one session
   usually share the server's actor, so kronicle-lite's count clears when
   any one of them re-reads. cc-anchor also keeps a ledger per `agent_id`
   (`scripts/owed.jq`): every agent owes each pending change until **its own**
@@ -762,7 +766,7 @@ Set them in your shell before launching `claude`, or in `settings.json` `env`.
 
 ```sh
 npm i --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@0.8.0   # real CLIs for the contract tests
-npm test                    # node:test, 142 tests (files run one at a time: timing budgets)
+npm test                    # node:test (files run one at a time: timing budgets)
 npm run lint                # shellcheck + node --check
 npm run validate            # claude plugin validate --strict --profile directory .
 ```
