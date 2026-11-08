@@ -2,7 +2,7 @@
 // turned into assertions, plus the 100 MB transcript blocker).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -210,24 +210,87 @@ test('TEL-9: a line longer than the window is skipped and reported by size; the 
   } finally { w.sb.cleanup(); }
 });
 
-test('TEL-10: a run killed mid-window (SIGKILL) leaves no torn line; the next run cleans its scratch and counts nothing twice', { skip: !HAS_TIMEOUT && 'no timeout(1)' }, () => {
+// TEL-10 used to kill runs with `timeout -s KILL 0.3|0.6` and expect ONE more
+// run to finish all 4000 lines. Both were wall-clock bets: under CPU load the
+// kills landed anywhere (or before any window), and the last run hit its 5 s
+// budget (CC_ANCHOR_TELEMETRY_BUDGET) and correctly stopped early. Now a jq
+// shim decides where each run stops: it parks a run inside its first window
+// (the test then SIGKILLs it) or fails a window pass (the run stops cleanly
+// after committing the windows before it), and the resume is driven run by
+// run until the offset reaches the end. No step depends on how fast a run is.
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(cond, what, ms = 120000) {
+  for (const t0 = Date.now(); !cond(); await sleepMs(5)) if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
+}
+function jqShim(dir) {
+  const real = spawnSync('bash', ['-c', 'command -v jq'], { encoding: 'utf8' }).stdout.trim();
+  fs.mkdirSync(dir, { recursive: true });
+  // Window passes are the jq calls with -f …/telemetry.jq. Pass $SHIM_PARK_AT
+  // records its pid and parks (exec keeps the pid) until the test kills it;
+  // pass $SHIM_FAIL_AT exits 1, which ends the run (`|| break`).
+  fs.writeFileSync(path.join(dir, 'jq'), `#!/usr/bin/env bash
+case " $* " in *telemetry.jq*)
+  n=$(( $(cat "$SHIM_DIR/count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$SHIM_DIR/count"
+  if [[ "$n" == "\${SHIM_FAIL_AT:-}" ]]; then exit 1; fi
+  if [[ "$n" == "\${SHIM_PARK_AT:-}" ]]; then echo "$$" > "$SHIM_DIR/parked.tmp"; mv "$SHIM_DIR/parked.tmp" "$SHIM_DIR/parked"; exec sleep 3600; fi;;
+esac
+exec ${JSON.stringify(real)} "$@"
+`, { mode: 0o755 });
+  return dir;
+}
+
+test('TEL-10: a run killed mid-window (SIGKILL) leaves no torn line; the next run cleans its scratch and counts nothing twice', async () => {
   const w = world();
   try {
     const L = [];
     for (let i = 0; i < 4000; i++) L.push(asst(`msg_${i}`, U(1, 1), [{ type: 'text', text: 'p'.repeat(900) }]));
     fs.writeFileSync(w.tx, J(L));
+    const size = fs.statSync(w.tx).size;
+    const st = path.join(w.sb.run, 'telemetry.state');
+    const offset = () => { try { return Number(fs.readFileSync(path.join(st, 'sess-tel-0001.jsonl'), 'utf8').split(' ')[0]); } catch { return 0; } };
+    const shim = jqShim(path.join(w.sb.base, 'shim'));
     const env = { ...w.sb.env, CC_ANCHOR_OBSERVER: 'telemetry', CC_ANCHOR_TELEMETRY_FILE: w.out, CC_ANCHOR_TELEMETRY_WINDOW: '262144' };
+    const shimEnv = (o) => { for (const f of ['count', 'parked']) fs.rmSync(path.join(shim, f), { force: true }); return { ...env, PATH: `${shim}:${env.PATH}`, SHIM_DIR: shim, ...o }; };
     const input = JSON.stringify({ session_id: 'sess-tel-0001', transcript_path: w.tx, cwd: w.sb.proj, hook_event_name: 'Stop' });
-    for (const ms of ['0.3', '0.6']) spawnSync('timeout', ['-s', 'KILL', ms, 'bash', path.join(SCRIPTS, 'telemetry.sh')], { input, env });
-    // a lock left by a killed run belongs to a dead pid: taken over, not waited on
-    const r = spawnSync('bash', [path.join(SCRIPTS, 'telemetry.sh')], { input, env, encoding: 'utf8' });
-    assert.equal(r.status, 0);
-    const text = fs.existsSync(w.out) ? fs.readFileSync(w.out, 'utf8') : '';
-    const recs = text.split('\n').filter(Boolean).map((l) => JSON.parse(l)); // throws on a torn line
-    const got = ids(recs);
-    assert.equal(new Set(got).size, got.length, 'no duplicates');
-    assert.equal(got.length, 4000, 'everything counted once the run completes');
-    assert.deepEqual(fs.readdirSync(path.join(w.sb.run, 'telemetry.state')).filter((f) => /^tmp\.|^lock$|\.tmp\./.test(f)), []);
+    const script = path.join(SCRIPTS, 'telemetry.sh');
+    const killed = [];
+    const killMidWindow = async () => {
+      const before = offset();
+      const p = spawn('bash', [script], { env: shimEnv({ SHIM_PARK_AT: '1' }), stdio: ['pipe', 'ignore', 'ignore'] });
+      const exited = new Promise((r) => p.once('exit', r));
+      p.stdin.end(input);
+      await until(() => fs.existsSync(path.join(shim, 'parked')), 'the run to park in its window');
+      assert.ok(fs.existsSync(path.join(st, `tmp.${p.pid}`, 'chunk')), 'killed with a window staged');
+      p.kill('SIGKILL'); await exited;
+      process.kill(Number(fs.readFileSync(path.join(shim, 'parked'), 'utf8')), 'SIGKILL'); // its orphaned jq
+      assert.equal(fs.readFileSync(path.join(st, 'lock', 'pid'), 'utf8').trim(), String(p.pid), 'the dead run still holds the lock');
+      assert.equal(offset(), before, 'a killed window is not committed');
+      killed.push(p.pid);
+    };
+    const outIds = () => {
+      const text = fs.existsSync(w.out) ? fs.readFileSync(w.out, 'utf8') : '';
+      const got = ids(text.split('\n').filter(Boolean).map((l) => JSON.parse(l))); // throws on a torn line
+      assert.equal(new Set(got).size, got.length, 'no duplicates');
+      return got;
+    };
+    const runOnce = (e = env) => {
+      const prev = offset();
+      const r = spawnSync('bash', [script], { input, env: e, encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      // a lock left by a killed run belongs to a dead pid: taken over, not waited on
+      assert.ok(offset() > prev, `the run made progress (stuck at ${prev} of ${size})`);
+      assert.deepEqual(fs.readdirSync(st).filter((f) => killed.some((k) => f.endsWith(`.${k}`))), [], 'killed runs\' scratch removed');
+      return outIds();
+    };
+    await killMidWindow();                       // before anything was committed
+    runOnce(shimEnv({ SHIM_FAIL_AT: '2' }));     // takes over the dead lock, commits exactly one window
+    assert.ok(offset() > 0 && offset() < size);
+    await killMidWindow();                       // mid-transcript, after committed progress
+    // each run reads until its budget (5 s) and the next resumes: drive it to the end, one run at a time
+    let got = [];
+    while (offset() < size) got = runOnce();
+    assert.equal(got.length, 4000, 'everything counted once the runs complete');
+    assert.deepEqual(fs.readdirSync(st).filter((f) => /^tmp\.|^lock$|\.tmp\./.test(f)), []);
   } finally { w.sb.cleanup(); }
 });
 
