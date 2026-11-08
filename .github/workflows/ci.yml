@@ -14,11 +14,16 @@ jobs:
       matrix:
         # 0.8.0: version-bound `pending` gate (tests/pending.test.mjs must run, not skip).
         # 0.7.0: the legacy "retraction since the last look" path stays covered.
+        # 0.9.0 (unreleased): built from a pinned kronicle-lite commit, nothing
+        # published; switch to the npm version once 0.9.0 is released.
         include:
           - kronicle: 0.8.0
             require_pending: '1'
           - kronicle: 0.7.0
             require_pending: '0'
+          - kronicle: 0.9.0-dev
+            kronicle_ref: f06a18314beae24088ac8f0fff9759e1fdae60e6
+            require_pending: '1'
     env:
       CC_ANCHOR_REQUIRE_PENDING: ${{ matrix.require_pending }}
     steps:
@@ -31,7 +36,29 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
+        if: ${{ !matrix.kronicle_ref }}
         run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@${{ matrix.kronicle }}
+      - name: Install the real sea-lite CLI for the contract tests
+        if: ${{ matrix.kronicle_ref }}
+        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
+      - name: Check out kronicle-lite at ${{ matrix.kronicle_ref }}
+        if: ${{ matrix.kronicle_ref }}
+        uses: actions/checkout@v4
+        with:
+          repository: rafe-walker/kronicle-lite
+          ref: ${{ matrix.kronicle_ref }}
+          # The directory must be named kronicle-lite: the pulse's read-only
+          # classifier and the .mcp.json detection know the CLI as
+          # …/kronicle-lite/dist/cli.js (tests/stress/gate.sh relies on it).
+          path: .ci/kronicle-lite
+      - name: Build kronicle-lite from source (no publish)
+        if: ${{ matrix.kronicle_ref }}
+        working-directory: .ci/kronicle-lite
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          node dist/cli.js --version
+          echo "KRONICLE_LITE_CLI=$PWD/dist/cli.js" >> "$GITHUB_ENV"
       - name: Test
         run: npm test
       - name: Wall-clock budget tests (informational, non-blocking)

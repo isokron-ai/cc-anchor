@@ -620,7 +620,7 @@ cc_sid_short() { local s="${1:-nosession}"; s="${s//[^A-Za-z0-9]/}"; printf '%s'
 #   cursor   full kronicle-lite cursor (actor cc-anchor-<sid8>)
 #   seq      chain head seq the cursor was issued at
 #   stamp    mtime gate: touched just BEFORE each read of the chain. While
-#            kronicle-lite.db and its -wal are older than the stamp nothing
+#            kronicle-lite.db and its (non-empty) -wal are older than the stamp nothing
 #            can have changed, so the hot path costs two builtin `-ot` tests
 #            and no process. A change makes the next call run a read-only
 #            `orient --focus pulse` (head seq) and, only if the head moved,
@@ -1057,6 +1057,12 @@ cc_kl_unchanged() {
   [[ -e "$db" ]] || return 1
   for f in "$db" "$db-wal"; do
     [[ -e "$f" ]] || continue
+    # An EMPTY -wal holds no frames, so it cannot carry a change: a commit
+    # appends frames (non-empty -wal), a checkpoint that empties it rewrites
+    # the .db. kronicle-lite >= 0.9.0 opens verify-chain read-only, and a
+    # read-only SQLite handle creates an empty -wal it cannot delete on
+    # close; its fresh mtime would cost an orient + verify-chain per write.
+    [[ "$f" == "$db" || -s "$f" ]] || continue
     if [[ "${CC_ANCHOR_TEST_MTIME_SECONDS:-0}" != 1 ]]; then
       [[ "$f" -ot "$CC_KL_B.stamp" ]] && continue
       [[ "$f" -nt "$CC_KL_B.stamp" ]] && return 1

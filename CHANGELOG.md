@@ -28,6 +28,16 @@ SemVer.
   written only on runs that flushed.
 
 ### Fixed
+- **kronicle-lite 0.9.0: an extra orient + verify-chain after every
+  head-unchanged store write.** kronicle-lite 0.9.0 (F12, first published
+  there) opens `verify-chain` read-only, and a read-only SQLite handle on a
+  WAL database leaves an empty `-wal` (and `-shm`) behind. The push/pulse
+  mtime gate took that file's fresh mtime for a store change, so the hot
+  path spawned kronicle-lite twice more after each such write (3 contract
+  tests failed against 0.9.0). The gate now ignores an empty `-wal`: it holds
+  no frames, and a write either adds frames or rewrites the `.db`.
+  CI now also runs the suite against kronicle-lite 0.9.0, built from a
+  pinned kronicle-lite commit (nothing is published).
 - Test TEL-10 (telemetry killed mid-window) was timing-flaky under CPU
   load: it killed runs with `timeout -s KILL 0.3|0.6` and expected one more
   run to count all 4000 lines, but that run is bounded by the 5 s budget and
