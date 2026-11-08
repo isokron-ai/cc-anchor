@@ -1213,3 +1213,27 @@ test('Stop: no card on disk => session_doc skipped but the claim guard still fir
     assert.deepEqual([hook('subagent-stop.sh', '', sb.env).status, hook('instructions-loaded.sh', '{}', sb.env).stdout, hook('task-created.sh', '', sb.env).status, hook('pre-tool-use.sh', '{', sb.env).stdout], [0, '', 0, '']);
   } finally { sb.cleanup(); }
 });
+
+// Test seam for the sea-lite stress harnesses (tests/stress/*.sh): with
+// CC_ANCHOR_TEST_DEADLINE_DIR the CLI deadline is an event the test fires
+// (a double writes a line to $CC_ANCHOR_DEADLINE and blocks), never the
+// clock — the real CLI missing scope_timeout under load made the stress
+// cases flaky. `to` is 600 s here: only the event can end the hung call.
+test('cc_with_timeout under CC_ANCHOR_TEST_DEADLINE_DIR: the deadline fires only on the event, kills the process group, exits 124; a normal call keeps its output and exit code', () => {
+  const sb = sandbox();
+  try {
+    const dl = path.join(sb.base, 'deadline');
+    fs.mkdirSync(dl);
+    const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+    // spawnSync's own timeout is only a safety net: it returns once nothing holds stdout.
+    const run = (cmd) => _spawnSync('bash', ['-c', `. ${q(path.join(SCRIPTS, 'lib.sh'))}; cc_with_timeout 600 bash -c ${q(cmd)}; echo "rc=$?"`], { encoding: 'utf8', timeout: 120000, env: { ...sb.env, CC_ANCHOR_TEST_DEADLINE_DIR: dl } });
+    const ok = run('echo out; exit 3');
+    assert.equal(ok.stdout, 'out\nrc=3\n', ok.stderr);
+    // The double fires its deadline and hangs; its child holds stdout, so
+    // this returns only if the whole process group was killed.
+    const hung = run('sleep 300 & echo fire > "$CC_ANCHOR_DEADLINE"; sleep 300');
+    assert.equal(hung.error, undefined, 'returned without the safety-net timeout');
+    assert.equal(hung.stdout, 'rc=124\n', hung.stderr);
+    assert.deepEqual(fs.readdirSync(dl), [], 'no FIFO or marker left behind');
+  } finally { sb.cleanup(); }
+});

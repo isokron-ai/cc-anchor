@@ -430,6 +430,7 @@ cc_find_cli() {
 # CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests).
 cc_with_timeout() {
   local to="$1"; shift
+  if [[ -n "${CC_ANCHOR_TEST_DEADLINE_DIR:-}" ]]; then cc_with_test_deadline "$@"; return; fi
   if [[ "${CC_ANCHOR_TEST_NO_TIMEOUT_BIN:-0}" != 1 ]]; then
     if command -v timeout >/dev/null 2>&1; then timeout "$to" "$@"; return; fi
     if command -v gtimeout >/dev/null 2>&1; then gtimeout "$to" "$@"; return; fi
@@ -444,6 +445,30 @@ cc_with_timeout() {
     wait "$cmd"; rc=$?
     kill -TERM -- "-$dog" 2>/dev/null
     (( rc == 143 )) && rc=124
+    exit "$rc"
+  )
+}
+
+# Tests only (CC_ANCHOR_TEST_DEADLINE_DIR): the deadline is an event, not a
+# clock. The command runs with CC_ANCHOR_DEADLINE=<fifo> and expires when a
+# line is written to that FIFO — by a test double playing "hung", which
+# writes it and then blocks — and never otherwise. Whether a CLI call timed
+# out is then decided by the test, not by how loaded the machine is (the
+# real sea-lite CLI missed scope_timeout under load and the guards failed
+# open, as designed). Same process-group kill and exit 124 as above.
+cc_with_test_deadline() {
+  local f
+  f="$(mktemp -u "${CC_ANCHOR_TEST_DEADLINE_DIR%/}/dl.XXXXXXXX")" && mkfifo -m 600 "$f" 2>/dev/null || return 125
+  (
+    set -m
+    CC_ANCHOR_DEADLINE="$f" "$@" </dev/null &
+    cmd=$!
+    ( exec 3<>"$f"; IFS= read -r _ <&3; : > "$f.fired"; kill -TERM -- "-$cmd" ) </dev/null >/dev/null 2>&1 &
+    dog=$!
+    wait "$cmd"; rc=$?
+    kill -TERM -- "-$dog" 2>/dev/null
+    if [[ -e "$f.fired" ]]; then rc=124; fi
+    rm -f "$f" "$f.fired" 2>/dev/null
     exit "$rc"
   )
 }
@@ -1716,10 +1741,14 @@ cc_bg_refresh() {
     # is told once per outage (cc_sea_advise) that the guard is degraded.
     # With no good claims to fall back on, the next call retries at once.
     ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
-    local wait=5; [[ -e "$CC_BG_D/claims.good" ]] || wait=1   # nothing to fall back on: retry at once
+    # Nothing to fall back on: retry at the very next call. (wait=1 meant
+    # "from the next wall-clock second": a call in the same second got no
+    # claims and no warning.)
+    local wait=5 why="using the last claims seen, retrying in 5 s"
+    [[ -e "$CC_BG_D/claims.good" ]] || { wait=0; why="no claims seen yet, retrying at the next call"; }
     printf '%s\n' "$((now - ttl + wait))" > "$CC_BG_D/claims.at" 2>/dev/null || true
     printf '%s\n' "$rc" > "$CC_BG_D/claims.degraded" 2>/dev/null || true
-    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); using the last claims seen, retrying in 5 s"
+    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); $why"
     return 1
   fi
   # The board call itself may write the store: stamp the cache AFTER it, so
