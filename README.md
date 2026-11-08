@@ -43,7 +43,7 @@ sea-lite claim — see [Pending](#pending-kronicle-lite--080).
 **0.5.1** stops trying to spot dangerous commands in shell text: while a
 change is pending only provably read-only Bash calls run, and while nothing
 is pending nothing is denied — see [The gate](#the-gate-pretooluse-bash).
-**0.6.0** (unreleased) gates each agent on its own re-reads, not on a
+**0.6.0** gates each agent on its own re-reads, not on a
 session-wide count (see [Pending](#pending-kronicle-lite--080)), and adds
 opt-in [audit telemetry](#audit-telemetry-opt-in) with an observer-effect switch.
 
@@ -348,7 +348,8 @@ The CLI is looked up like the other hooks do (`CC_ANCHOR_KRONICLE_LITE_BIN`,
 `PATH`, the plugin cache, `node_modules`) and finally in the npx cache, where
 the isokron-plugins `npx -y kronicle-lite@… serve` launch leaves it. Needs
 kronicle-lite ≥ 0.5.0 (retraction diffs); CI runs the contract tests against
-0.7.0 and 0.8.0 (`.github/workflows/ci.yml`).
+0.7.0, 0.8.0 and 0.9.0 (`.github/workflows/ci.yml`; 0.9.0 is built from a
+pinned kronicle-lite commit until it is on npm).
 
 | Switch | Default | |
 |---|---|---|
@@ -702,7 +703,7 @@ Install (project scope — the file is meant to be committed; `--scope user`
 writes `~/.cursor/hooks.json` and runs from `~/.cursor/`):
 
 ```sh
-node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.5.1/scripts/anchor.mjs cursor install
+node ~/.claude/plugins/cache/cc-anchor/cc-anchor/0.6.0/scripts/anchor.mjs cursor install
 # or from a checkout: node /path/to/cc-anchor/scripts/anchor.mjs cursor install
 ```
 

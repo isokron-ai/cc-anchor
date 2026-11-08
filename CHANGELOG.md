@@ -6,6 +6,8 @@ SemVer.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-08
+
 ### Added
 - **Audit telemetry (opt-in).** `scripts/telemetry.sh` + `scripts/telemetry.jq`
   on `Stop` / `SubagentStop` / `PreCompact` / `SessionEnd` (new hook) record
@@ -38,6 +40,19 @@ SemVer.
   no frames, and a write either adds frames or rewrites the `.db`.
   CI now also runs the suite against kronicle-lite 0.9.0, built from a
   pinned kronicle-lite commit (nothing is published).
+- **Bash guard: no claims after a failed board call until the next second.**
+  With no earlier claims to fall back on, a failed `sea-lite board` was to
+  be retried at the next call, but the cache only went stale from the next
+  wall-clock second: a Bash call in the same second was checked against no
+  claims and got no warning. It now retries at the very next call.
+- The sea-lite stress cases (`tests/stress/bash-guard*.sh`,
+  `scope-guard.sh`) were flaky under CPU load. A different case failed in 2
+  of 12 runs: the real CLI missed the hooks' 4 s `scope_timeout`, and the
+  guard failed open as designed. Under the test seam
+  `CC_ANCHOR_TEST_DEADLINE_DIR`, a CLI deadline fires only when a test
+  double fires it, never by the clock. Background writes and the PreToolUse
+  stamp tick use explicit barriers. The 50k-file scan's 5 s budget is
+  checked only with `CC_ANCHOR_PERF_TESTS=1`.
 - Test TEL-10 (telemetry killed mid-window) was timing-flaky under CPU
   load: it killed runs with `timeout -s KILL 0.3|0.6` and expected one more
   run to count all 4000 lines, but that run is bounded by the 5 s budget and
@@ -57,7 +72,6 @@ SemVer.
   the same `agent_id` takes it back. Inert on kronicle-lite ≤ 0.7.0.
 - `cc_kl_pending_fmt` moved into `scripts/owed.jq` (mode `fmt`) so the gate
   and the ledger print the same pending lines.
-
 - **Ledger gate bypasses (PR #6 review).**
   - A doc read with no current version, a partial read (`| head`), an
     erroring get, a grep that mentions the doc, or an `echo` of the new text
