@@ -329,6 +329,55 @@ test('push/pulse fail open: a CLI that crashes or prints garbage → allow, the 
   } finally { sb.cleanup(); }
 });
 
+// kronicle-lite 0.9.0 (F12, first published in 0.9.0): verify-chain opens the
+// store read-only, and a read-only SQLite handle on a WAL database creates an
+// EMPTY -wal (and -shm) it cannot delete on close. An empty -wal holds no
+// frames: a commit always appends frames (non-empty -wal) or, checkpointed,
+// rewrites the .db. Taking its fresh mtime for a store change cost an extra
+// orient + verify-chain after every head-unchanged store write.
+for (const [label, extraEnv] of [['', {}], [' — 1-second mtime view (bash 3.2 / macOS)', { CC_ANCHOR_TEST_MTIME_SECONDS: '1' }]]) test(`push/pulse: the empty -wal a read-only verify-chain leaves behind is not a store change${label}`, () => {
+  const sb = sandbox();
+  try {
+    const data = path.join(sb.base, 'kl-data');
+    fs.mkdirSync(data);
+    const db = path.join(data, 'kronicle-lite.db');
+    fs.writeFileSync(db, 'db');
+    const calls = path.join(sb.base, 'calls');
+    const cli = path.join(sb.base, 'kl-stub.mjs');
+    fs.writeFileSync(cli, `import fs from 'node:fs';
+const a = process.argv.slice(2); const db = ${JSON.stringify(db)};
+fs.appendFileSync(${JSON.stringify(calls)}, a[0] + '\\n');
+if (a[0] === 'verify-chain') {
+  if (!fs.existsSync(db + '-wal')) fs.writeFileSync(db + '-wal', '');
+  if (!fs.existsSync(db + '-shm')) fs.writeFileSync(db + '-shm', Buffer.alloc(64));
+  console.log(JSON.stringify({ ok: true, first_mismatch: null }));
+} else console.log(JSON.stringify({ cursor: 'sxt1.c5', head: { seq: 5, hash: 'h5' }, integrity: { ok: true }, retractions: [] }));
+`);
+    const env = { CC_ANCHOR_KRONICLE: '1', CC_ANCHOR_KRONICLE_LITE_BIN: cli, CC_ANCHOR_KRONICLE_DATA_DIR: data, ...extraEnv };
+    const n = (cmd) => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter((l) => l === cmd).length : 0);
+    post(sb, env); // init: one orient at the head
+    assert.equal(n('orient'), 1);
+    // A head-unchanged write (e.g. our own retractions orient) lands after the stamp.
+    const stamp = path.join(sb.run, 'push', 'sessunit.stamp');
+    const t = Date.now() / 1000;
+    fs.utimesSync(stamp, t - 10, t - 10);
+    fs.utimesSync(db, t - 5, t - 5);
+    post(sb, env);
+    assert.equal(n('orient'), 2, 'the store changed: one read-only pulse');
+    assert.equal(n('verify-chain'), 1, 'head unchanged: integrity re-checked once (L2-02)');
+    assert.ok(fs.existsSync(`${db}-wal`) && fs.statSync(`${db}-wal`).size === 0, 'the read-only verify-chain left an empty -wal');
+    for (let i = 0; i < 3; i++) post(sb, env);
+    assert.equal(pre(sb, './bin/deploy --target x', env).stdout, '', 'the pulse runs it: nothing pending');
+    assert.equal(n('orient'), 2, 'settled: the empty -wal is not a change (push or pulse)');
+    assert.equal(n('verify-chain'), 1);
+    // A real commit puts frames in the -wal: that IS a change.
+    fs.writeFileSync(`${db}-wal`, 'frame');
+    fs.utimesSync(`${db}-wal`, t + 5, t + 5);
+    post(sb, env);
+    assert.equal(n('orient'), 3, 'a non-empty -wal newer than the stamp is still read');
+  } finally { sb.cleanup(); }
+});
+
 test('push=0 / pulse=0 switch the hooks off even when kronicle-lite is configured', () => {
   const sb = sandbox();
   try {

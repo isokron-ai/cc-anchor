@@ -1,5 +1,6 @@
 // Contract tests for the 0.4.0 retraction push / pulse against the REAL
-// kronicle-lite CLI (>= 0.5.0; CI installs the published 0.8.0 and 0.7.0), the same way
+// kronicle-lite CLI (>= 0.5.0; CI installs the published 0.8.0 and 0.7.0 and builds
+// 0.9.0 from a pinned kronicle-lite commit), the same way
 // sea-contract.test.mjs pins the scope guard to the real sea-lite.
 //
 // The CLI is found at $KRONICLE_LITE_CLI, ./node_modules/kronicle-lite, or a
