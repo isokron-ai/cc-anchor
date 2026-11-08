@@ -28,6 +28,13 @@ SemVer.
   written only on runs that flushed.
 
 ### Fixed
+- Test TEL-10 (telemetry killed mid-window) was timing-flaky under CPU
+  load: it killed runs with `timeout -s KILL 0.3|0.6` and expected one more
+  run to count all 4000 lines, but that run is bounded by the 5 s budget and
+  stopped early (e.g. `1267 !== 4000`). A jq shim on `PATH` now parks a run
+  inside its first window (then SIGKILL) or fails a pass to stop a run after
+  exactly one committed window, and the resume is driven run by run until
+  the offset reaches the end. No production code changed.
 - **Pending gate shared across subagents (L2-05, hardening-live).** One
   agent's re-read cleared the gate for every agent of the session (they
   share the MCP server's kronicle-lite actor), and a subagent started after
