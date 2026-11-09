@@ -793,8 +793,8 @@ stream-json --verbose`.
 
 ## License
 
-Apache-2.0 © Joshua Bryan. See `LICENSE` and `NOTICE`.
+Apache-2.0. See `LICENSE` and `NOTICE`.
 
 ---
 
-Product: https://isokron.ai · Built off-grid in Cochise County, AZ by a laid-off support engineer — https://theexiledentrepreneur.com
+Built and maintained by [IsoKron](https://isokron.ai).
