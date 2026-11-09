@@ -5,6 +5,10 @@
 # usage: CCA=<cc-anchor next-cycle> SLBIN=<sea-lite>/dist/cli.js stress/cca/bash-guard.sh [case]
 set -uo pipefail
 CCA=${CCA:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}; SLBIN=${SLBIN:-$CCA/node_modules/sea-lite/dist/cli.js}; only=${1:-}
+# The hooks run from a test copy of scripts/ whose CLI deadlines are events
+# (tests/support/seam-plugin.sh + deadline-seam.sh); the shipped lib.sh has no seam.
+CCA_SEAM=$(bash "$CCA/tests/support/seam-plugin.sh" "$CCA") || { echo "FAIL seam-plugin.sh"; exit 1; }
+CCA=$CCA_SEAM; trap 'rm -rf "$CCA_SEAM"' EXIT
 pass=0; fail=0
 setup() {
   W=$(mktemp -d "${TMPROOT:-${TMPDIR:-/tmp}}/bg.XXXXXX"); P=$W/proj; mkdir -p "$P/src/auth" "$P/src/billing" "$W/home"
@@ -12,7 +16,7 @@ setup() {
   git -C "$P" add -A; git -C "$P" -c user.name=t -c user.email=t@x commit -qm init
   export HOME=$W/home KRONICLE_LITE_DATA_DIR=$W/sea CLAUDE_PROJECT_DIR=$P CC_ANCHOR_SEA_LITE_BIN=$SLBIN CC_ANCHOR_SEA=1 CC_ANCHOR_KRONICLE=0
   # The hooks' CLI deadlines (scope_timeout, find, git) fire only when a test double
-  # fires them (scripts/lib.sh cc_with_test_deadline), never by the clock: under load
+  # fires them (tests/support/deadline-seam.sh, test copy only), never by the clock: under load
   # the real sea-lite missed its 4 s and the guard failed open (by design), so the
   # expected warning went missing at random.
   mkdir -p "$W/deadline"; export CC_ANCHOR_TEST_DEADLINE_DIR=$W/deadline

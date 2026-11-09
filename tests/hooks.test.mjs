@@ -1215,18 +1215,21 @@ test('Stop: no card on disk => session_doc skipped but the claim guard still fir
 });
 
 // Test seam for the sea-lite stress harnesses (tests/stress/*.sh): with
-// CC_ANCHOR_TEST_DEADLINE_DIR the CLI deadline is an event the test fires
-// (a double writes a line to $CC_ANCHOR_DEADLINE and blocks), never the
-// clock — the real CLI missing scope_timeout under load made the stress
-// cases flaky. `to` is 600 s here: only the event can end the hung call.
-test('cc_with_timeout under CC_ANCHOR_TEST_DEADLINE_DIR: the deadline fires only on the event, kills the process group, exits 124; a normal call keeps its output and exit code', () => {
+// tests/support/deadline-seam.sh sourced after lib.sh (a test copy of
+// scripts/, never the shipped hooks) and CC_ANCHOR_TEST_DEADLINE_DIR set,
+// the CLI deadline is an event the test fires (a double writes a line to
+// $CC_ANCHOR_DEADLINE and blocks), never the clock — the real CLI missing
+// scope_timeout under load made the stress cases flaky. `to` is 600 s
+// here: only the event can end the hung call.
+const SEAM = path.join(ROOT, 'tests', 'support', 'deadline-seam.sh');
+test('test-only deadline seam (tests/support/deadline-seam.sh): the deadline fires only on the event, kills the process group, exits 124; a normal call keeps its output and exit code', () => {
   const sb = sandbox();
   try {
     const dl = path.join(sb.base, 'deadline');
     fs.mkdirSync(dl);
     const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
     // spawnSync's own timeout is only a safety net: it returns once nothing holds stdout.
-    const run = (cmd) => _spawnSync('bash', ['-c', `. ${q(path.join(SCRIPTS, 'lib.sh'))}; cc_with_timeout 600 bash -c ${q(cmd)}; echo "rc=$?"`], { encoding: 'utf8', timeout: 120000, env: { ...sb.env, CC_ANCHOR_TEST_DEADLINE_DIR: dl } });
+    const run = (cmd) => _spawnSync('bash', ['-c', `. ${q(path.join(SCRIPTS, 'lib.sh'))}; . ${q(SEAM)}; cc_with_timeout 600 bash -c ${q(cmd)}; echo "rc=$?"`], { encoding: 'utf8', timeout: 120000, env: { ...sb.env, CC_ANCHOR_TEST_DEADLINE_DIR: dl } });
     const ok = run('echo out; exit 3');
     assert.equal(ok.stdout, 'out\nrc=3\n', ok.stderr);
     // The double fires its deadline and hangs; its child holds stdout, so
@@ -1235,5 +1238,58 @@ test('cc_with_timeout under CC_ANCHOR_TEST_DEADLINE_DIR: the deadline fires only
     assert.equal(hung.error, undefined, 'returned without the safety-net timeout');
     assert.equal(hung.stdout, 'rc=124\n', hung.stderr);
     assert.deepEqual(fs.readdirSync(dl), [], 'no FIFO or marker left behind');
+  } finally { sb.cleanup(); }
+});
+
+// 0.6.0 review: the seam used to sit in the shipped lib.sh behind
+// CC_ANCHOR_TEST_DEADLINE_DIR alone. With /nonexistent the scope guard
+// allowed an edit inside another session's claim in 42 ms (exit 125); with a
+// real directory a hung sea-lite was never cut off. In production the
+// variable must do nothing.
+test('production hooks: CC_ANCHOR_TEST_DEADLINE_DIR neither shortens nor removes a CLI deadline, and the scope guard still denies (0.6.0 review)', () => {
+  const sb = sandbox();
+  try {
+    const dl = path.join(sb.base, 'deadline');
+    fs.mkdirSync(dl);
+    const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+    const run = (to, cmd, extra) => _spawnSync('bash', ['-c', `. ${q(path.join(SCRIPTS, 'lib.sh'))}; cc_with_timeout ${to} bash -c ${q(cmd)}; echo "rc=$?"`], { encoding: 'utf8', timeout: 120000, env: { ...sb.env, ...extra } });
+    for (const dir of ['/nonexistent', dl]) {
+      for (const fallback of ['0', '1']) {
+        const env = { CC_ANCHOR_TEST_DEADLINE_DIR: dir, CC_ANCHOR_TEST_NO_TIMEOUT_BIN: fallback };
+        const ok = run(30, 'echo out; exit 3', env);
+        assert.equal(ok.stdout, 'out\nrc=3\n', `normal call kept (dir=${dir}, fallback=${fallback}) ${ok.stderr}`);
+        // Hung, with a child holding stdout: returns only when the clock deadline kills the group.
+        const t0 = Date.now();
+        const hung = run(1, 'sleep 300 & sleep 300', env);
+        const ms = Date.now() - t0;
+        assert.equal(hung.error, undefined, `clock deadline still applies (dir=${dir}, fallback=${fallback})`);
+        assert.equal(hung.stdout, 'rc=124\n', hung.stderr);
+        assert.ok(ms < 30000, `${ms} ms`);
+      }
+    }
+    assert.deepEqual(fs.readdirSync(dl), [], 'nothing made in the directory');
+    // End to end through the scope guard.
+    const conflict = JSON.stringify({ schema: 'sea-lite.scope-check/1', ok: false, conflicts: [{ ticket_id: 'tkt_X', title: 'X', holder: 'b', holder_label: 'b', held: ['src/**'], claim_expires_at: '2099' }] });
+    const deny = fakeCli(sb, 'sea-lite', `echo '${conflict}'; exit 1`);
+    const p = fixture('pretooluse-edit.json', { cwd: sb.proj, tool_input: { file_path: `${sb.proj}/src/login.ts` } });
+    for (const dir of ['/nonexistent', dl]) {
+      fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
+      const r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: deny, CC_ANCHOR_TEST_DEADLINE_DIR: dir });
+      assert.equal(r.json?.hookSpecificOutput?.permissionDecision, 'deny', `dir=${dir}: ${r.stdout} ${r.stderr}`);
+    }
+    // A hung sea-lite with a real directory is still cut off at scope_timeout (fail-open, as documented).
+    const hang = fakeCli(sb, 'sea-lite-hang', 'sleep 30; exit 1');
+    fs.rmSync(path.join(sb.run, 'scope-cache.json'), { force: true });
+    const t0 = Date.now();
+    const r = hook('pre-tool-use.sh', p, sb.env, { CC_ANCHOR_SCOPE_GUARD: '1', CC_ANCHOR_SEA_LITE_BIN: hang, CC_ANCHOR_SCOPE_TIMEOUT: '1', CC_ANCHOR_TEST_DEADLINE_DIR: dl });
+    const ms = Date.now() - t0;
+    assert.equal(r.status, 0);
+    assert.equal(r.json?.hookSpecificOutput?.permissionDecision, undefined, 'fail-open on timeout, unchanged');
+    assert.ok(ms < 15000, `bounded by scope_timeout, not by the 30 s hang: ${ms} ms`);
+    assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /exited 124 \(crash or timeout\)/);
+    // And nothing on the hook path mentions it.
+    for (const f of fs.readdirSync(SCRIPTS)) {
+      assert.doesNotMatch(fs.readFileSync(path.join(SCRIPTS, f), 'utf8'), /TEST_DEADLINE|CC_ANCHOR_DEADLINE|deadline-seam/, `scripts/${f} carries no deadline seam`);
+    }
   } finally { sb.cleanup(); }
 });

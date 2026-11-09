@@ -427,10 +427,13 @@ cc_find_cli() {
 # Code's own hook timeout. The fallback runs CMD in its own process group
 # (set -m) with a watchdog that signals the whole group, so a wrapper
 # script's children cannot keep a $(…) capture open after the kill.
-# CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests).
+# CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests); it changes
+# which mechanism enforces the bound, never the bound. There is no test
+# seam here: no environment variable shortens or removes a deadline (the
+# stress harnesses swap this function out in a test copy of scripts/, see
+# tests/support/seam-plugin.sh).
 cc_with_timeout() {
   local to="$1"; shift
-  if [[ -n "${CC_ANCHOR_TEST_DEADLINE_DIR:-}" ]]; then cc_with_test_deadline "$@"; return; fi
   if [[ "${CC_ANCHOR_TEST_NO_TIMEOUT_BIN:-0}" != 1 ]]; then
     if command -v timeout >/dev/null 2>&1; then timeout "$to" "$@"; return; fi
     if command -v gtimeout >/dev/null 2>&1; then gtimeout "$to" "$@"; return; fi
@@ -445,31 +448,6 @@ cc_with_timeout() {
     wait "$cmd"; rc=$?
     kill -TERM -- "-$dog" 2>/dev/null
     (( rc == 143 )) && rc=124
-    exit "$rc"
-  )
-}
-
-# Tests only (CC_ANCHOR_TEST_DEADLINE_DIR): the deadline is an event, not a
-# clock. The command runs with CC_ANCHOR_DEADLINE=<fifo> and expires when a
-# line is written to that FIFO — by a test double playing "hung", which
-# writes it and then blocks — and never otherwise. Whether a CLI call timed
-# out is then decided by the test, not by how loaded the machine is (the
-# real sea-lite CLI missed scope_timeout under load and the guards failed
-# open, as designed). Same process-group kill and exit 124 as above.
-cc_with_test_deadline() {
-  local f
-  f="$(mktemp -u "${CC_ANCHOR_TEST_DEADLINE_DIR%/}/dl.XXXXXXXX")" && mkfifo -m 600 "$f" 2>/dev/null || return 125
-  (
-    set -m
-    CC_ANCHOR_DEADLINE="$f" "$@" </dev/null &
-    cmd=$!
-    # A plain read-open (O_RDWR on a FIFO is not portable: it hung on macOS).
-    ( IFS= read -r _ < "$f"; : > "$f.fired"; kill -TERM -- "-$cmd" ) </dev/null >/dev/null 2>&1 &
-    dog=$!
-    wait "$cmd"; rc=$?
-    kill -TERM -- "-$dog" 2>/dev/null
-    if [[ -e "$f.fired" ]]; then rc=124; fi
-    rm -f "$f" "$f.fired" 2>/dev/null
     exit "$rc"
   )
 }

@@ -6,13 +6,17 @@
 set -uo pipefail
 CCA=${CCA:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}; SLBIN=${SLBIN:-$CCA/node_modules/sea-lite/dist/cli.js}; only=${1:-}
 TMPROOT=${TMPROOT:-${TMPDIR:-/tmp}}
+# The hooks run from a test copy of scripts/ whose CLI deadlines are events
+# (tests/support/seam-plugin.sh + deadline-seam.sh); the shipped lib.sh has no seam.
+CCA_SEAM=$(TMPROOT=$TMPROOT bash "$CCA/tests/support/seam-plugin.sh" "$CCA") || { echo "FAIL seam-plugin.sh"; exit 1; }
+CCA=$CCA_SEAM; trap 'rm -rf "$CCA_SEAM"' EXIT
 pass=0; fail=0
 ok() { echo "ok   $1"; pass=$((pass+1)); }; bad() { echo "FAIL $1"; fail=$((fail+1)); }
 run() { [[ -z "$only" || "$only" == "$1" ]]; }
 setup() {
   W=$(mktemp -d "$TMPROOT/sg.XXXXXX"); P=$W/proj; mkdir -p "$P/src/auth" "$W/home"; git -C "$P" init -q; echo a > "$P/src/auth/login.ts"
   export HOME=$W/home KRONICLE_LITE_DATA_DIR=$W/sea CLAUDE_PROJECT_DIR=$P CC_ANCHOR_SEA_LITE_BIN=$SLBIN CC_ANCHOR_SEA=1 CC_ANCHOR_KRONICLE=0 CC_ANCHOR_SCOPE_GUARD=1
-  # CLI deadlines fire only when a double fires them, never by the clock (see bash-guard.sh).
+  # CLI deadlines fire only when a double fires them, never by the clock (test copy; see bash-guard.sh).
   mkdir -p "$W/deadline"; export CC_ANCHOR_TEST_DEADLINE_DIR=$W/deadline
   export CC_ANCHOR_HEARTBEAT=0   # not under test; a detached background writer of the store (see bash-guard.sh)
   printf '#!/bin/bash\nif [ -e %q/slow ] && [ -n "$CC_ANCHOR_DEADLINE" ]; then echo fire > "$CC_ANCHOR_DEADLINE"; exec sleep 600; fi\nexec node %q "$@"\n' "$W" "$SLBIN" > "$W/slow-sl"; chmod +x "$W/slow-sl"
