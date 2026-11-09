@@ -50,7 +50,7 @@ opt-in [audit telemetry](#audit-telemetry-opt-in) with an observer-effect switch
 ## Install
 
 ```sh
-claude plugin marketplace add rafe-walker/cc-anchor
+claude plugin marketplace add isokron-ai/cc-anchor
 /plugin install cc-anchor@cc-anchor
 ```
 
@@ -195,7 +195,7 @@ age of the hand-edited section: yellow + ⚠ past 45 min, red past 90.
 
 ## With kronicle-lite
 
-[kronicle-lite](https://github.com/rafe-walker/kronicle-lite) gives an agent
+[kronicle-lite](https://github.com/isokron-ai/kronicle-lite) gives an agent
 an `orient` call (`get_system_state`) that returns exactly what changed since
 its last cursor. The cursor is the one thing a compaction summary reliably
 loses. cc-anchor:

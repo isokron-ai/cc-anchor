@@ -615,7 +615,7 @@ sea-lite both fail open and say so in the log.
 - `render.jq` reserves a line for the `Instructions:` row so the card stays
   ≤ 25 lines.
 
-[0.2.0]: https://github.com/rafe-walker/cc-anchor/compare/v0.1.0...v0.2.0
+[0.2.0]: https://github.com/isokron-ai/cc-anchor/compare/v0.1.0...v0.2.0
 
 ## [0.1.0] — 2026-10-31
 
@@ -644,4 +644,4 @@ sea-lite both fail open and say so in the log.
   (shellcheck, node:test, `claude plugin validate --strict --profile
   directory`), 42 tests against payloads copied from the hooks reference.
 
-[0.1.0]: https://github.com/rafe-walker/cc-anchor/releases/tag/v0.1.0
+[0.1.0]: https://github.com/isokron-ai/cc-anchor/releases/tag/v0.1.0
