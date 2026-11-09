@@ -6,7 +6,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "IsoKron (https://isokron.ai)",
-  "repository": "github:rafe-walker/cc-anchor",
+  "repository": "github:isokron-ai/cc-anchor",
   "engines": {
     "node": ">=18"
   },
