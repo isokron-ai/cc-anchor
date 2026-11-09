@@ -5,7 +5,7 @@
   "description": "Claude Code plugin: an anchor card that survives context compaction.",
   "type": "module",
   "license": "Apache-2.0",
-  "author": "Joshua Bryan",
+  "author": "IsoKron (https://isokron.ai)",
   "repository": "github:rafe-walker/cc-anchor",
   "engines": {
     "node": ">=18"

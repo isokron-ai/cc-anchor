@@ -1,7 +1,7 @@
 {
   "name": "cc-anchor",
   "owner": {
-    "name": "Joshua Bryan",
+    "name": "IsoKron",
     "url": "https://isokron.ai"
   },
   "description": "cc-anchor: a Claude Code plugin whose anchor card (goal, invariants, breadcrumbs, cursor) survives context compaction. This repository is its own marketplace.",

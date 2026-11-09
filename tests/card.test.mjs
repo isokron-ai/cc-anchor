@@ -44,9 +44,9 @@ test('renderTop(parseCard(x)) round-trips the hand-edited top byte-for-byte', ()
 });
 
 test('round-trip preserves unknown hand-written lines in the top section', () => {
-  const text = SAMPLE.replace('Invariants:', 'Owner: Joshua (off-grid, AZ)\nInvariants:');
+  const text = SAMPLE.replace('Invariants:', 'Owner: platform team\nInvariants:');
   const c = parseCard(text);
-  assert.deepEqual(c.extraTop, ['Owner: Joshua (off-grid, AZ)']);
+  assert.deepEqual(c.extraTop, ['Owner: platform team']);
   const top = text.slice(0, text.indexOf(MARKER));
   assert.equal(renderTop(c), top);
 });
