@@ -16,6 +16,10 @@ setup() {
   # the real sea-lite missed its 4 s and the guard failed open (by design), so the
   # expected warning went missing at random.
   mkdir -p "$W/deadline"; export CC_ANCHOR_TEST_DEADLINE_DIR=$W/deadline
+  # No lease heartbeat: it is not under test here, and as a detached background
+  # `sea-lite heartbeat` it wrote the sea-lite store while a case ran (and re-created
+  # $W/sea after done_ removed it).
+  export CC_ANCHOR_HEARTBEAT=0
   T=$(cd "$P" && node "$SLBIN" create "Auth work" --triaged --json | jq -r .ticket.id)
   (cd "$P" && node "$SLBIN" claim "$T" --paths "${CLAIM:-src/auth}" --lease 900 --actor claude --session sess-A >/dev/null)
   n=0

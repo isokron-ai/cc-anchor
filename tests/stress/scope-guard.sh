@@ -14,6 +14,7 @@ setup() {
   export HOME=$W/home KRONICLE_LITE_DATA_DIR=$W/sea CLAUDE_PROJECT_DIR=$P CC_ANCHOR_SEA_LITE_BIN=$SLBIN CC_ANCHOR_SEA=1 CC_ANCHOR_KRONICLE=0 CC_ANCHOR_SCOPE_GUARD=1
   # CLI deadlines fire only when a double fires them, never by the clock (see bash-guard.sh).
   mkdir -p "$W/deadline"; export CC_ANCHOR_TEST_DEADLINE_DIR=$W/deadline
+  export CC_ANCHOR_HEARTBEAT=0   # not under test; a detached background writer of the store (see bash-guard.sh)
   printf '#!/bin/bash\nif [ -e %q/slow ] && [ -n "$CC_ANCHOR_DEADLINE" ]; then echo fire > "$CC_ANCHOR_DEADLINE"; exec sleep 600; fi\nexec node %q "$@"\n' "$W" "$SLBIN" > "$W/slow-sl"; chmod +x "$W/slow-sl"
 }
 claim() { local T; T=$(cd "$P" && node "$SLBIN" create "$1" --triaged --json | jq -r .ticket.id); (cd "$P" && node "$SLBIN" claim "$T" --paths "$2" --lease 900 --actor a --session sess-A >/dev/null); }
