@@ -27,6 +27,8 @@
 # session, `sea-lite heartbeat --session <session_id>` runs in the
 # background and renews the session's live claims (cc_sea_heartbeat), so a
 # task longer than one lease keeps its lock. When not due: builtins only.
+# Each run is bounded by heartbeat_timeout s (10) and reaped; the hook never
+# waits for it (0.6.0).
 #
 # Extra, WITH kronicle-lite (0.4.0): retraction push (cc_kl_push, config
 # `push`, auto = on when kronicle-lite is configured). New retractions since

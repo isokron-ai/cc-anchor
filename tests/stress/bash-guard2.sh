@@ -18,20 +18,27 @@ if run checkout_away; then setup; git -C "$P" checkout -q -b other; git -C "$P" 
 if run git_stash; then setup; echo dirty >> "$P/src/auth/login.ts"; warm
   out=$(call "git stash -q"); expect_warn "git stash (reverts the holder's uncommitted work in the claim)" "$out" "login.ts"; done_; fi
 if run bg_write; then setup; warm
-  out=$(call "(sleep 2; echo late >> src/auth/login.ts) >/dev/null 2>&1 &"); sleep 3; out2=$(call "true")
+  # The job writes when the harness releases it (FIFO barrier), after its call returned,
+  # and the next call starts only once the write is done: no race against sleeps.
+  mkfifo "$W/go" "$W/wrote"
+  out=$(call "(read -r _ < $W/go; echo late >> src/auth/login.ts; echo done > $W/wrote) >/dev/null 2>&1 &")
+  echo go > "$W/go"; read -r _ < "$W/wrote"; out2=$(call "true")
   expect_warn "write by a background job that lands after the Bash call returned" "$out$out2" "login.ts"; done_; fi
 if run gitignore_same_call; then setup; warm
   out=$(call "echo 'src/auth/' >> .gitignore; echo z >> src/auth/login.ts"); expect_warn "claimed path git-ignored in the same call" "$out" "login.ts"; done_; fi
 if run ignored_claim; then CLAIM=config setup; mkdir -p "$P/config"; echo 'config/' > "$P/.gitignore"; echo a > "$P/config/local.env"; warm
   out=$(call "echo z >> config/local.env"); expect_warn "claim on a git-ignored path (config/)" "$out" "local.env"; done_; fi
 # board call too slow once (scope_timeout 4 s): the cache is emptied and stamped "fresh" for bash_guard_ttl (30 s)
-if run board_timeout; then setup; F=$W/slow-sl; printf '#!/bin/bash\n[ -e %q/slow ] && sleep 6\nexec node %q "$@"\n' "$W" "$SLBIN" > "$F"; chmod +x "$F"; export CC_ANCHOR_SEA_LITE_BIN=$F
+if run board_timeout; then setup; F=$W/slow-sl; printf '#!/bin/bash\nif [ -e %q/slow ] && [ -n "$CC_ANCHOR_DEADLINE" ]; then echo fire > "$CC_ANCHOR_DEADLINE"; exec sleep 600; fi\nexec node %q "$@"\n' "$W" "$SLBIN" > "$F"; chmod +x "$F"; export CC_ANCHOR_SEA_LITE_BIN=$F
+  # The slow call times out (the double fires its deadline) and the edit follows in the
+  # SAME second (pinned clock): "nothing to fall back on, retry at once" must hold then too.
+  export CC_ANCHOR_TEST_NOW=$(date +%s)
   touch "$W/slow"; t="toolu_w$RANDOM"; pre sess-B "$t" true; post sess-B "$t" >/dev/null; rm -f "$W/slow"
   out=$(call "echo z >> src/auth/login.ts"); expect_warn "edit 2 s after ONE slow board call (sea-lite healthy again)" "$out" "login.ts"; log_tail
-  export CC_ANCHOR_SEA_LITE_BIN=$SLBIN; done_; fi
+  unset CC_ANCHOR_TEST_NOW; export CC_ANCHOR_SEA_LITE_BIN=$SLBIN; done_; fi
 if run no_tool_use_id; then setup; warm
   jq -nc --arg cwd "$P" '{session_id:"sess-B",hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"x"},cwd:$cwd}' | bash "$CCA/scripts/pulse.sh" >/dev/null 2>&1
-  (cd "$P" && echo z >> src/auth/login.ts)
+  tick notid; (cd "$P" && echo z >> src/auth/login.ts)
   out=$(jq -nc --arg cwd "$P" '{session_id:"sess-B",hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"x"},tool_response:{stdout:""},cwd:$cwd}' | bash "$CCA/scripts/post-tool-use.sh" 2>/dev/null)
   expect_warn "payload without tool_use_id" "$out" "login.ts"; done_; fi
 if run same_session_subagent; then setup; warm

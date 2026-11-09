@@ -427,23 +427,32 @@ cc_find_cli() {
 # Code's own hook timeout. The fallback runs CMD in its own process group
 # (set -m) with a watchdog that signals the whole group, so a wrapper
 # script's children cannot keep a $(…) capture open after the kill.
-# CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests).
+# A command that ignores SIGTERM gets SIGKILL 2 s later (timeout -k 2;
+# the fallback likewise), so nothing outlives SECS + 2 s.
+# CC_ANCHOR_TEST_NO_TIMEOUT_BIN=1 forces the fallback (tests); it changes
+# which mechanism enforces the bound, never the bound. There is no test
+# seam here: no environment variable shortens or removes a deadline (the
+# stress harnesses swap this function out in a test copy of scripts/, see
+# tests/support/seam-plugin.sh).
 cc_with_timeout() {
   local to="$1"; shift
+  local rc=""
   if [[ "${CC_ANCHOR_TEST_NO_TIMEOUT_BIN:-0}" != 1 ]]; then
-    if command -v timeout >/dev/null 2>&1; then timeout "$to" "$@"; return; fi
-    if command -v gtimeout >/dev/null 2>&1; then gtimeout "$to" "$@"; return; fi
+    if command -v timeout >/dev/null 2>&1; then timeout -k 2 "$to" "$@"; rc=$?
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout -k 2 "$to" "$@"; rc=$?; fi
+    if [[ -n "$rc" ]]; then (( rc == 137 )) && rc=124; return "$rc"; fi
   fi
   (
     set -m
     "$@" </dev/null &
     cmd=$!
     ( trap 'kill "${s:-}" 2>/dev/null; exit 0' TERM
-      sleep "$to" & s=$!; wait "$s"; kill -TERM -- "-$cmd" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+      sleep "$to" & s=$!; wait "$s"; kill -TERM -- "-$cmd" 2>/dev/null
+      sleep 2 & s=$!; wait "$s"; kill -KILL -- "-$cmd" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
     dog=$!
     wait "$cmd"; rc=$?
     kill -TERM -- "-$dog" 2>/dev/null
-    (( rc == 143 )) && rc=124
+    (( rc == 143 || rc == 137 )) && rc=124
     exit "$rc"
   )
 }
@@ -519,6 +528,11 @@ cc_claims_live() {
 # lapsed one. Switch `heartbeat`: on / off; unset = on when this project has
 # seen claims (claims.json) or sea-lite is configured. Hot path when not
 # due: bash builtins only (one read of the stamp file).
+# Bounded (0.6.0): each run gets `heartbeat_timeout` s (default 10; SIGKILL
+# 2 s after the SIGTERM) under cc_with_timeout, which waits on it and so
+# reaps it; the hook itself never waits. At most one run per session is in
+# flight (hb-<session>.pid): a still-running one is not stacked on. A hung
+# sea-lite used to leave one immortal `sea-lite heartbeat` per due hook.
 cc_sea_heartbeat() {
   local payload="$1" sid="" now="" last="" stamp iv sw short
   [[ "$payload" =~ \"session_id\":[[:space:]]*\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
@@ -548,10 +562,18 @@ cc_sea_heartbeat() {
   [[ -n "$actor" ]] && args+=(--actor "$actor")
   [[ -n "${CC_ANCHOR_SEA_DATA_DIR:-}" ]] && args+=(--data-dir "$CC_ANCHOR_SEA_DATA_DIR")
   local run=("$bin"); [[ "$bin" == *.js || "$bin" == *.mjs ]] && run=(node "$bin")
+  local hto pid=""; hto="$(cc_cfg_raw heartbeat_timeout)"
+  [[ "$hto" =~ ^[0-9]+$ ]] && (( 10#$hto >= 1 )) && hto=$(( 10#$hto )) || hto=10
   if [[ "${CC_ANCHOR_SYNC:-0}" == "1" ]]; then
-    "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 || true
+    cc_with_timeout "$hto" "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 || true
   else
-    ( "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 & ) >/dev/null 2>&1
+    if [[ -s "$stamp.pid" ]]; then IFS= read -r pid < "$stamp.pid" || true; fi
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      cc_log_once hb_inflight "heartbeat: the previous run for this session is still going (bounded by heartbeat_timeout); not starting another"
+      return 0
+    fi
+    ( cc_with_timeout "$hto" "${run[@]}" "${args[@]}" >> "$CC_LOG" 2>&1 &
+      printf '%s\n' "$!" > "$stamp.pid" ) </dev/null >/dev/null 2>&1
   fi
   return 0
 }
@@ -1716,10 +1738,14 @@ cc_bg_refresh() {
     # is told once per outage (cc_sea_advise) that the guard is degraded.
     # With no good claims to fall back on, the next call retries at once.
     ttl="$(cc_cfg_raw bash_guard_ttl)"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=30
-    local wait=5; [[ -e "$CC_BG_D/claims.good" ]] || wait=1   # nothing to fall back on: retry at once
+    # Nothing to fall back on: retry at the very next call. (wait=1 meant
+    # "from the next wall-clock second": a call in the same second got no
+    # claims and no warning.)
+    local wait=5 why="using the last claims seen, retrying in 5 s"
+    [[ -e "$CC_BG_D/claims.good" ]] || { wait=0; why="no claims seen yet, retrying at the next call"; }
     printf '%s\n' "$((now - ttl + wait))" > "$CC_BG_D/claims.at" 2>/dev/null || true
     printf '%s\n' "$rc" > "$CC_BG_D/claims.degraded" 2>/dev/null || true
-    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); using the last claims seen, retrying in 5 s"
+    cc_log_once bg_board "bash_guard: sea-lite board failed (exit $rc); $why"
     return 1
   fi
   # The board call itself may write the store: stamp the cache AFTER it, so

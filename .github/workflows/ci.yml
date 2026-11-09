@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: test (kronicle-lite ${{ matrix.kronicle }})
+    name: test (kronicle-lite ${{ matrix.kronicle }}, sea-lite ${{ matrix.sea || '^0.4.0' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,6 +16,9 @@ jobs:
         # 0.7.0: the legacy "retraction since the last look" path stays covered.
         # 0.9.0 (unreleased): built from a pinned kronicle-lite commit, nothing
         # published; switch to the npm version once 0.9.0 is released.
+        # sea-lite: every leg installs ^0.4.0 from npm except the 0.7.0-dev leg,
+        # built from a pinned sea-lite commit (chore/version-0.7.0, unreleased);
+        # switch it to the npm version once 0.7.0 is released.
         include:
           - kronicle: 0.8.0
             require_pending: '1'
@@ -24,6 +27,10 @@ jobs:
           - kronicle: 0.9.0-dev
             kronicle_ref: f06a18314beae24088ac8f0fff9759e1fdae60e6
             require_pending: '1'
+          - kronicle: 0.8.0
+            require_pending: '1'
+            sea: 0.7.0-dev
+            sea_ref: 1ba85df77fff4b3f177667dd93c07d5b9cd57007
     env:
       CC_ANCHOR_REQUIRE_PENDING: ${{ matrix.require_pending }}
     steps:
@@ -35,12 +42,33 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck
       - name: Lint
         run: npm run lint
-      - name: Install the real sea-lite and kronicle-lite CLIs for the contract tests
-        if: ${{ !matrix.kronicle_ref }}
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0 kronicle-lite@${{ matrix.kronicle }}
-      - name: Install the real sea-lite CLI for the contract tests
-        if: ${{ matrix.kronicle_ref }}
-        run: npm install --no-save --no-package-lock sea-lite@^0.4.0
+      - name: Install the real sea-lite / kronicle-lite CLIs from npm for the contract tests
+        env:
+          SEA_REF: ${{ matrix.sea_ref }}
+          KRONICLE_REF: ${{ matrix.kronicle_ref }}
+          KRONICLE: ${{ matrix.kronicle }}
+        run: |
+          pkgs=()
+          [ -n "$SEA_REF" ] || pkgs+=("sea-lite@^0.4.0")
+          [ -n "$KRONICLE_REF" ] || pkgs+=("kronicle-lite@$KRONICLE")
+          [ ${#pkgs[@]} -eq 0 ] || npm install --no-save --no-package-lock "${pkgs[@]}"
+      - name: Check out sea-lite at ${{ matrix.sea_ref }}
+        if: ${{ matrix.sea_ref }}
+        uses: actions/checkout@v4
+        with:
+          repository: rafe-walker/sea-lite
+          ref: ${{ matrix.sea_ref }}
+          # Named sea-lite: the pulse's read-only classifier knows the CLI as
+          # …/sea-lite/dist/cli.js.
+          path: .ci/sea-lite
+      - name: Build sea-lite from source (no publish)
+        if: ${{ matrix.sea_ref }}
+        working-directory: .ci/sea-lite
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          node dist/cli.js --version
+          echo "SEA_LITE_CLI=$PWD/dist/cli.js" >> "$GITHUB_ENV"
       - name: Check out kronicle-lite at ${{ matrix.kronicle_ref }}
         if: ${{ matrix.kronicle_ref }}
         uses: actions/checkout@v4

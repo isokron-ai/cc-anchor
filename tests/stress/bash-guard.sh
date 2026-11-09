@@ -5,12 +5,25 @@
 # usage: CCA=<cc-anchor next-cycle> SLBIN=<sea-lite>/dist/cli.js stress/cca/bash-guard.sh [case]
 set -uo pipefail
 CCA=${CCA:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}; SLBIN=${SLBIN:-$CCA/node_modules/sea-lite/dist/cli.js}; only=${1:-}
+# The hooks run from a test copy of scripts/ whose CLI deadlines are events
+# (tests/support/seam-plugin.sh + deadline-seam.sh); the shipped lib.sh has no seam.
+CCA_SEAM=$(bash "$CCA/tests/support/seam-plugin.sh" "$CCA") || { echo "FAIL seam-plugin.sh"; exit 1; }
+CCA=$CCA_SEAM; trap 'rm -rf "$CCA_SEAM"' EXIT
 pass=0; fail=0
 setup() {
   W=$(mktemp -d "${TMPROOT:-${TMPDIR:-/tmp}}/bg.XXXXXX"); P=$W/proj; mkdir -p "$P/src/auth" "$P/src/billing" "$W/home"
   git -C "$P" init -q; echo 'export const a = 1;' > "$P/src/auth/login.ts"; echo 'b' > "$P/src/billing/pay.ts"
   git -C "$P" add -A; git -C "$P" -c user.name=t -c user.email=t@x commit -qm init
   export HOME=$W/home KRONICLE_LITE_DATA_DIR=$W/sea CLAUDE_PROJECT_DIR=$P CC_ANCHOR_SEA_LITE_BIN=$SLBIN CC_ANCHOR_SEA=1 CC_ANCHOR_KRONICLE=0
+  # The hooks' CLI deadlines (scope_timeout, find, git) fire only when a test double
+  # fires them (tests/support/deadline-seam.sh, test copy only), never by the clock: under load
+  # the real sea-lite missed its 4 s and the guard failed open (by design), so the
+  # expected warning went missing at random.
+  mkdir -p "$W/deadline"; export CC_ANCHOR_TEST_DEADLINE_DIR=$W/deadline
+  # No lease heartbeat: it is not under test here, and as a detached background
+  # `sea-lite heartbeat` it wrote the sea-lite store while a case ran (and re-created
+  # $W/sea after done_ removed it).
+  export CC_ANCHOR_HEARTBEAT=0
   T=$(cd "$P" && node "$SLBIN" create "Auth work" --triaged --json | jq -r .ticket.id)
   (cd "$P" && node "$SLBIN" claim "$T" --paths "${CLAIM:-src/auth}" --lease 900 --actor claude --session sess-A >/dev/null)
   n=0
@@ -18,7 +31,12 @@ setup() {
 pre()  { jq -nc --arg s "$1" --arg t "$2" --arg c "$3" --arg cwd "$P" '{session_id:$s,hook_event_name:"PreToolUse",tool_name:"Bash",tool_use_id:$t,tool_input:{command:$c},cwd:$cwd}' | bash "$CCA/scripts/pulse.sh" >/dev/null 2>&1; }
 post() { jq -nc --arg s "$1" --arg t "$2" --arg cwd "$P" '{session_id:$s,hook_event_name:"PostToolUse",tool_name:"Bash",tool_use_id:$t,tool_input:{command:"x"},tool_response:{stdout:""},cwd:$cwd}' | bash "$CCA/scripts/post-tool-use.sh" 2>/dev/null; }
 # one Bash call by session sB: pre -> work -> post ; echo hook output
-call() { local tid="toolu_$((++n))"; pre sess-B "$tid" "$1"; sleep "${GAP:-0}"; (cd "$P" && eval "$1"); post sess-B "$tid"; }
+# Barrier, not a gap: return once the filesystem clock has moved past the call's
+# PreToolUse stamp, so what the call changes is strictly -newer than it even when both
+# would fall in one coarse timestamp tick (Claude Code starts the shell well after the
+# hook returns; a harness that runs the work at once must wait for the tick itself).
+tick() { local s="$P/.claude/cc-anchor/bashguard/sessB.pre.$1" pr="$W/tick"; [[ -e "$s" ]] || return 0; touch "$pr"; until [[ "$pr" -nt "$s" ]]; do touch "$pr"; done; }
+call() { local tid="toolu_$((++n))"; pre sess-B "$tid" "$1"; tick "$tid"; (cd "$P" && eval "$1"); post sess-B "$tid"; }
 verbose() { [[ -n "${VERBOSE:-}" ]] && jq -r .hookSpecificOutput.additionalContext <<<"$1" >&2; return 0; }
 expect_warn() { # name output path-fragment
   verbose "$2"
@@ -45,7 +63,7 @@ if run touch_r; then setup; touch -d '1 day ago' "$P/src/billing/pay.ts"; warm
   out=$(call "echo hacked > src/auth/login.ts; touch -r src/billing/pay.ts src/auth/login.ts"); expect_warn "write then touch -r back-dates mtime" "$out" login.ts; done_; fi
 if run parallel; then setup; warm
   # two Bash calls of the same session overlap (parallel tool calls / two subagents): pre t1, pre t2, t1 edits, post t1
-  pre sess-B toolu_p1 "echo y >> src/auth/login.ts"; pre sess-B toolu_p2 "ls"; (cd "$P" && echo y >> src/auth/login.ts)
+  pre sess-B toolu_p1 "echo y >> src/auth/login.ts"; pre sess-B toolu_p2 "ls"; tick toolu_p1; (cd "$P" && echo y >> src/auth/login.ts)
   out=$(post sess-B toolu_p1); post sess-B toolu_p2 >/dev/null
   expect_warn "overlapping Bash calls in one session (parallel/subagents)" "$out" login.ts; done_; fi
 if run fresh_claim; then CLAIM=src/billing setup; warm
@@ -70,7 +88,8 @@ if run newline; then setup; warm
 if run hardlink; then setup; ln "$P/src/auth/login.ts" "$P/alias.ts"; warm
   out=$(call "echo z >> alias.ts"); expect_warn "edit through a hard link outside the claim" "$out" login.ts; done_; fi
 if run bigrepo; then CLAIM=. setup; mkdir -p "$P/big"; for d in $(seq 1 50); do mkdir -p "$P/big/d$d"; for f in $(seq 1 1000); do : > "$P/big/d$d/f$f"; done; done; warm
+  # The wall-clock budget is checked only with CC_ANCHOR_PERF_TESTS=1 (like the other budgets).
   t0=$(date +%s%N); out=$(call "echo z >> big/d50/f1000"); t=$(( ($(date +%s%N)-t0)/1000000 ))
-  if [[ "$out" == *"bash guard"* ]] && (( t < 5000 )); then echo "ok   claim '.' over 50k files: warned in ${t} ms"; pass=$((pass+1)); else echo "FAIL claim '.' over 50k files: ${t} ms, warned=$([[ $out == *guard* ]] && echo y || echo n)"; fail=$((fail+1)); fi; done_; fi
+  if [[ "$out" == *"bash guard"* ]] && { [[ "${CC_ANCHOR_PERF_TESTS:-0}" != 1 ]] || (( t < 5000 )); }; then echo "ok   claim '.' over 50k files: warned in ${t} ms"; pass=$((pass+1)); else echo "FAIL claim '.' over 50k files: ${t} ms, warned=$([[ $out == *guard* ]] && echo y || echo n)"; fail=$((fail+1)); fi; done_; fi
 echo; echo "bash-guard: pass=$pass fail=$fail"
 exit $(( fail > 0 ))

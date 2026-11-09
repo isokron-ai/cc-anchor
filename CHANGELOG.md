@@ -6,6 +6,8 @@ SemVer.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-08
+
 ### Added
 - **Audit telemetry (opt-in).** `scripts/telemetry.sh` + `scripts/telemetry.jq`
   on `Stop` / `SubagentStop` / `PreCompact` / `SessionEnd` (new hook) record
@@ -18,6 +20,10 @@ SemVer.
 - **Observer-effect switch** `CC_ANCHOR_OBSERVER=off|telemetry|telemetry+anchors`:
   `off` and `telemetry` make every other cc-anchor hook a no-op;
   `off` also wins over `CC_ANCHOR_TELEMETRY=1`.
+- Config `heartbeat_timeout` (default 10 s): the hard limit for one lease
+  heartbeat run (see Fixed).
+- CI also runs the suite against sea-lite 0.7.0, built from a pinned
+  sea-lite commit (nothing is published); the other legs keep `^0.4.0`.
 - Telemetry is bounded and exactly-once: reads at most a 4 MiB window per jq
   pass and 5 s per run (resumed next run), and moves the offset atomically
   after the records are written. A seen-set of message ids, tool_use ids and
@@ -28,6 +34,28 @@ SemVer.
   written only on runs that flushed.
 
 ### Fixed
+- **A test seam could switch off the CLI deadline in a real session (PR #13
+  review).** The deadline seam for the stress harnesses sat in the shipped
+  `scripts/lib.sh` behind the environment variable alone. With
+  `CC_ANCHOR_TEST_DEADLINE_DIR=/nonexistent` the scope guard allowed an Edit
+  inside another session's claim in 42 ms (exit 125); with a real directory
+  no CLI call (scope-check, board, find, git, kronicle-lite) had a deadline
+  at all. The seam is gone from `scripts/`: it lives in
+  `tests/support/deadline-seam.sh`, and the stress harnesses run the hooks
+  from a test copy of `scripts/` that sources it
+  (`tests/support/seam-plugin.sh`). In a normal session the variable does
+  nothing; a test proves it (deny still denies, a hung CLI is still cut off
+  at `scope_timeout`). The scope guard's fail-open on timeout is unchanged.
+- **Lease heartbeat: no time limit, one hung process per hook (PR #13
+  review).** Each due PostToolUse started a detached `sea-lite heartbeat`
+  with no bound; against a hung sea-lite, 3 hooks left 3 processes running
+  indefinitely. Each run is now bounded by `heartbeat_timeout` s (10) and
+  waited on, so it is reaped; the hook still never waits for it. At most one
+  run per session is in flight (`hb-<session>.pid`). The inline
+  (`CC_ANCHOR_SYNC=1`) run has the same bound.
+- `cc_with_timeout` sends SIGKILL 2 s after the SIGTERM (`timeout -k 2`, and
+  the same in the macOS fallback), so a CLI that ignores SIGTERM can no
+  longer outlive its deadline; exit status 124 either way.
 - **kronicle-lite 0.9.0: an extra orient + verify-chain after every
   head-unchanged store write.** kronicle-lite 0.9.0 (F12, first published
   there) opens `verify-chain` read-only, and a read-only SQLite handle on a
@@ -38,6 +66,19 @@ SemVer.
   no frames, and a write either adds frames or rewrites the `.db`.
   CI now also runs the suite against kronicle-lite 0.9.0, built from a
   pinned kronicle-lite commit (nothing is published).
+- **Bash guard: no claims after a failed board call until the next second.**
+  With no earlier claims to fall back on, a failed `sea-lite board` was to
+  be retried at the next call, but the cache only went stale from the next
+  wall-clock second: a Bash call in the same second was checked against no
+  claims and got no warning. It now retries at the very next call.
+- The sea-lite stress cases (`tests/stress/bash-guard*.sh`,
+  `scope-guard.sh`) were flaky under CPU load. A different case failed in 2
+  of 12 runs: the real CLI missed the hooks' 4 s `scope_timeout`, and the
+  guard failed open as designed. Under the test-only deadline seam
+  (`tests/support/deadline-seam.sh`, see above), a CLI deadline fires only
+  when a test double fires it, never by the clock. Background writes and the PreToolUse
+  stamp tick use explicit barriers. The 50k-file scan's 5 s budget is
+  checked only with `CC_ANCHOR_PERF_TESTS=1`.
 - Test TEL-10 (telemetry killed mid-window) was timing-flaky under CPU
   load: it killed runs with `timeout -s KILL 0.3|0.6` and expected one more
   run to count all 4000 lines, but that run is bounded by the 5 s budget and
@@ -57,7 +98,6 @@ SemVer.
   the same `agent_id` takes it back. Inert on kronicle-lite ≤ 0.7.0.
 - `cc_kl_pending_fmt` moved into `scripts/owed.jq` (mode `fmt`) so the gate
   and the ledger print the same pending lines.
-
 - **Ledger gate bypasses (PR #6 review).**
   - A doc read with no current version, a partial read (`| head`), an
     erroring get, a grep that mentions the doc, or an `echo` of the new text
