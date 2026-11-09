@@ -463,7 +463,8 @@ cc_with_test_deadline() {
     set -m
     CC_ANCHOR_DEADLINE="$f" "$@" </dev/null &
     cmd=$!
-    ( exec 3<>"$f"; IFS= read -r _ <&3; : > "$f.fired"; kill -TERM -- "-$cmd" ) </dev/null >/dev/null 2>&1 &
+    # A plain read-open (O_RDWR on a FIFO is not portable: it hung on macOS).
+    ( IFS= read -r _ < "$f"; : > "$f.fired"; kill -TERM -- "-$cmd" ) </dev/null >/dev/null 2>&1 &
     dog=$!
     wait "$cmd"; rc=$?
     kill -TERM -- "-$dog" 2>/dev/null
