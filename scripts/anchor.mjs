@@ -113,6 +113,7 @@ export const CONFIG_KEYS = {
   scope_timeout: { default: 4, hook: 'PreToolUse', doc: 'seconds to wait for sea-lite scope-check before failing open' },
   heartbeat: { default: 'auto', hook: 'PostToolUse', doc: 'renew this session\'s sea-lite leases in the background (auto = when claims were seen or sea-lite is configured)' },
   heartbeat_interval: { default: 60, hook: 'PostToolUse', doc: 'minimum seconds between two lease heartbeats per session' },
+  heartbeat_timeout: { default: 10, hook: 'PostToolUse', doc: 'hard limit in seconds for one background lease heartbeat (SIGKILL 2 s after SIGTERM); the hook never waits for it' },
   sea_session: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'session to act as instead of the hook\'s session_id (Cursor: the --session your sea-lite server runs with)' },
   sea_actor: { default: '', hook: 'PreToolUse/PostToolUse', doc: 'pass --actor to sea-lite (default: the session\'s own server actor; every claim of the session counts as yours)' },
   push: { default: 'auto', hook: 'PostToolUse', doc: 'inject kronicle-lite retractions that landed since the last tool call (auto = when kronicle-lite is configured)' },

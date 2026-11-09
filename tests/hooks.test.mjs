@@ -1293,3 +1293,61 @@ test('production hooks: CC_ANCHOR_TEST_DEADLINE_DIR neither shortens nor removes
     }
   } finally { sb.cleanup(); }
 });
+
+// 0.6.0 review: each due PostToolUse left a `sea-lite heartbeat` with no time
+// limit; against a hung sea-lite, 3 hooks left 3 immortal processes. Now each
+// run is bounded by heartbeat_timeout (SIGKILL 2 s after SIGTERM) and reaped,
+// and the hook does not wait for it. The shim ignores SIGTERM, so the KILL
+// escalation is what ends it; both timeout(1) and the macOS fallback.
+test('PostToolUse heartbeat against a hung sea-lite: hooks return at once, and no heartbeat process survives heartbeat_timeout (0.6.0 review)', () => {
+  const sb = sandbox();
+  try {
+    const pids = path.join(sb.base, 'hb-pids');
+    const shim = fakeCli(sb, 'sea-lite', `[ "$1" = heartbeat ] || exit 0\necho $$ >> ${JSON.stringify(pids)}\ntrap '' TERM\nexec sleep 120`);
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const readPids = () => (fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').filter(Boolean).map(Number) : []);
+    const waitUntil = (cond, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (cond()) return true; _spawnSync('sleep', ['0.2']); } return cond(); };
+    let all = [];
+    for (const fallback of ['0', '1']) {
+      fs.rmSync(pids, { force: true });
+      for (let i = 1; i <= 3; i++) {
+        const t0 = Date.now();
+        const r = hook('post-tool-use.sh', { session_id: `sess-hb${fallback}${i}`, cwd: sb.proj, hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: `t${i}`, tool_input: {}, tool_response: {} }, sb.env,
+          { CC_ANCHOR_SEA_LITE_BIN: shim, CC_ANCHOR_SYNC: '0', CC_ANCHOR_HEARTBEAT: '1', CC_ANCHOR_HEARTBEAT_TIMEOUT: '5', CC_ANCHOR_TEST_NO_TIMEOUT_BIN: fallback });
+        const ms = Date.now() - t0;
+        assert.equal(r.status, 0);
+        assert.ok(ms < 4000, `hook ${i} did not wait for the hung heartbeat (fallback=${fallback}): ${ms} ms`);
+      }
+      assert.ok(waitUntil(() => readPids().length === 3, 15000), `3 heartbeats started (fallback=${fallback}): ${readPids()}`);
+      all = all.concat(readPids());
+      // heartbeat_timeout 5 s + 2 s to SIGKILL; generous slack for a loaded runner, far below the shim's 120 s.
+      assert.ok(waitUntil(() => readPids().every((pid) => !alive(pid)), 30000), `no heartbeat survives (fallback=${fallback}): alive ${readPids().filter(alive)}`);
+    }
+    assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /./, 'runtime log exists');
+  } finally {
+    for (const pid of (fs.existsSync(path.join(sb.base, 'hb-pids')) ? fs.readFileSync(path.join(sb.base, 'hb-pids'), 'utf8').trim().split('\n').filter(Boolean).map(Number) : [])) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+    sb.cleanup();
+  }
+});
+
+test('heartbeat: a run still in flight for the session is not stacked on (hb-<session>.pid), and heartbeat_timeout falls back to 10 on junk', () => {
+  const sb = sandbox();
+  try {
+    const calls = path.join(sb.base, 'hb-calls');
+    const shim = fakeCli(sb, 'sea-lite', `[ "$1" = heartbeat ] || exit 0\necho $$ >> ${JSON.stringify(calls)}\nexec sleep 120`);
+    const n = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).length : 0);
+    const waitUntil = (cond, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (cond()) return true; _spawnSync('sleep', ['0.2']); } return cond(); };
+    const env = { CC_ANCHOR_SYNC: '0', CC_ANCHOR_SEA_LITE_BIN: shim, CC_ANCHOR_HEARTBEAT: '1', CC_ANCHOR_HEARTBEAT_INTERVAL: '0', CC_ANCHOR_HEARTBEAT_TIMEOUT: '0' };
+    const post = () => hook('post-tool-use.sh', { session_id: 'sess-stack', cwd: sb.proj, hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 't', tool_input: {}, tool_response: {} }, sb.env, env);
+    post();
+    assert.ok(waitUntil(() => n() === 1, 15000), 'first heartbeat started');
+    post(); post();
+    _spawnSync('sleep', ['1']);
+    assert.equal(n(), 1, 'no second run while the first is in flight (and timeout 0 did not mean "kill at once")');
+    assert.match(fs.readFileSync(path.join(sb.run, 'log'), 'utf8'), /previous run for this session is still going/);
+  } finally {
+    const calls = path.join(sb.base, 'hb-calls');
+    for (const pid of (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map(Number) : [])) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+    sb.cleanup();
+  }
+});
