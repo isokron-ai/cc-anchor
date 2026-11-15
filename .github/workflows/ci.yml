@@ -8,7 +8,10 @@ on:
 jobs:
   test:
     name: test (kronicle-lite ${{ matrix.kronicle }}, sea-lite ${{ matrix.sea || '^0.4.0' }})
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: while that label moves between 24.04 and
+    # 26.04, apt gives shellcheck 0.9.0 or 0.11.0, and 0.9.0 fails the lint
+    # step on findings 0.11.0 no longer reports (SC2317, SC2119/SC2120).
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +42,7 @@ jobs:
         with:
           node-version: 22
       - name: Install jq and shellcheck
-        run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck
+        run: sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck && shellcheck --version
       - name: Lint
         run: npm run lint
       - name: Install the real sea-lite / kronicle-lite CLIs from npm for the contract tests
