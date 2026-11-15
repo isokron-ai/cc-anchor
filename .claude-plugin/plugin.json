@@ -8,7 +8,7 @@
     "url": "https://isokron.ai"
   },
   "homepage": "https://isokron.ai",
-  "repository": "https://github.com/rafe-walker/cc-anchor",
+  "repository": "https://github.com/isokron-ai/cc-anchor",
   "license": "Apache-2.0",
   "keywords": [
     "compaction",
@@ -24,7 +24,7 @@
     "cursor"
   ],
   "icon": "./assets/icon.png",
-  "documentationUrl": "https://github.com/rafe-walker/cc-anchor#readme",
-  "supportUrl": "https://github.com/rafe-walker/cc-anchor/issues",
+  "documentationUrl": "https://github.com/isokron-ai/cc-anchor#readme",
+  "supportUrl": "https://github.com/isokron-ai/cc-anchor/issues",
   "privacyPolicyUrl": "https://isokron.ai/privacy"
 }

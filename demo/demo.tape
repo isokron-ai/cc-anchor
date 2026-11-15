@@ -1,6 +1,6 @@
 # cc-anchor demo — record with https://github.com/charmbracelet/vhs:
 #   cd some-project && vhs /path/to/cc-anchor/demo/demo.tape
-# Assumes the plugin is installed (claude plugin marketplace add rafe-walker/cc-anchor
+# Assumes the plugin is installed (claude plugin marketplace add isokron-ai/cc-anchor
 # && claude plugin install cc-anchor@cc-anchor) and the project has a file to read.
 Output demo.gif
 Set Shell bash
