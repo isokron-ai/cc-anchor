@@ -34,7 +34,18 @@ cc_with_timeout() {
     dog=$!
     wait "$cmd"; rc=$?
     kill -TERM -- "-$dog" 2>/dev/null
-    if [[ -e "$f.fired" ]]; then rc=124; fi
+    if [[ -e "$f.fired" ]]; then
+      rc=124
+      # The group TERM can miss a child the command forks at that moment: on
+      # macOS a process forked while its group is being signalled does not get
+      # the signal, and its parent dies as fork returns. With /bin/bash 3.2,
+      # which forks the last command of `bash -c 'a & b; c'`, about one hung
+      # call in eight left `c` running under load, holding the caller's stdout
+      # (the macOS job's 120 s spawnSync timeouts). The leader is reaped now,
+      # so every member exists: SIGKILL the group until it is empty.
+      n=0
+      while kill -KILL -- "-$cmd" 2>/dev/null && (( n++ < 50 )); do sleep 0.1; done
+    fi
     rm -f "$f" "$f.fired" 2>/dev/null
     exit "$rc"
   )

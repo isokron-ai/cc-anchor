@@ -6,6 +6,17 @@ SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Test-only deadline seam (`tests/support/deadline-seam.sh`): when the event
+  deadline fires, the seam now SIGKILLs the command's process group until it
+  is empty. A child forked as the group TERM went out could miss the signal
+  on macOS (`/bin/bash` 3.2 forks the last command of `bash -c`) and keep the
+  caller's stdout open, so the macOS job's seam test hung to its 120 s
+  safety net about one run in eight. No shipped hook changes.
+- CI: the Linux test legs run on `ubuntu-26.04` instead of `ubuntu-latest`,
+  which moved between 24.04 (shellcheck 0.9.0, lint fails) and 26.04
+  (shellcheck 0.11.0).
+
 ## [0.6.0] — 2026-11-08
 
 ### Added
